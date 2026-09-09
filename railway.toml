@@ -1,0 +1,16 @@
+# Railway config-as-code (https://docs.railway.com/reference/config-as-code).
+# What a file can carry is here; the volume mounted at /data and the
+# environment variables (CLUB_SETUP_KEY, optionally CLUB_SECRET) are set on the
+# service — by the template, or by hand (README「Deploy」).
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/api/v1/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+# App sleeping stays off: the first person to open an invite link should see
+# the club, not a cold start (simple-games docs/architecture/club.md §14-6).
+sleepApplication = false

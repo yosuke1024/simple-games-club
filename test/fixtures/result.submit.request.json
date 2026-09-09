@@ -1,0 +1,6 @@
+{
+  "contractVersion": 1,
+  "boardDigest": "sd1:9f3a1c07",
+  "outcome": "completed",
+  "facts": { "elapsedSeconds": 305, "mistakes": 2, "hints": 0 }
+}

@@ -1,0 +1,12 @@
+{
+  "gameId": "sudoku",
+  "contractVersion": 1,
+  "params": { "difficulty": "hard" },
+  "seed": "sudoku-free-mf8k2a-1x9q",
+  "boardDigest": "sd1:9f3a1c07",
+  "title": null,
+  "result": {
+    "outcome": "completed",
+    "facts": { "elapsedSeconds": 271, "mistakes": 0, "hints": 1 }
+  }
+}

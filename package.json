@@ -1,0 +1,32 @@
+{
+  "name": "simple-games-club",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Game Club server for Simple Games by PixApps — self-hosted, one server is one club",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/server.js",
+    "dev": "pnpm build && CLUB_DATA_DIR=./data pnpm start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.5.0",
+    "eslint": "^10.8.0",
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
+  }
+}

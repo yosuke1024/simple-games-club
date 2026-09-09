@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+
+# Local data (the SQLite file and the generated secret live on the volume, never in git)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# The Simple Games web build is a release artifact, not source (README「Web build」)
+web/*
+!web/.gitkeep
+!web/README.md
+
+# Logs / OS
+*.log
+.DS_Store
+
+# Environment files
+.env
+.env.*
+!.env.example
