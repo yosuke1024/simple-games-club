@@ -51,6 +51,10 @@ docker run -d --name club \
 
 Put it behind HTTPS. The app refuses `http://` endpoints other than localhost.
 
+The `-v` is not optional: the image declares no `VOLUME` of its own (Railway
+rejects the instruction), so without a mount the club lives inside the
+container and disappears with it.
+
 ### Claim the club
 
 The first owner exchanges the setup key for a member token. The app does this
