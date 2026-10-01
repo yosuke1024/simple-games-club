@@ -1,21 +1,24 @@
 # simple-games-club
 
-The server behind **Private Game Club**, the optional shared layer of
+The server behind **Club House**, the optional layer of
 [Simple Games by PixApps](https://github.com/yosuke1024/simple-games).
-One server is one club: a small group of people who know each other, playing
-the same puzzles on their own devices and bringing only the results together.
+One deployment is one club: people playing the same puzzles on their own
+devices and bringing only the results together. It runs in two shapes from the
+same source — a Node process with a SQLite file, or a Cloudflare Worker with a
+Durable Object — and the same contract tests prove both.
 
 Nothing about the games runs here. The app and the web version generate every
 board on the device; this server holds a club's members, the challenges they
 post (a game, a mode, a seed) and each member's result for a challenge — the
 figures the result screen showed, and a nickname. There are no accounts,
-passwords or e-mail addresses, no ranking across challenges, no notifications,
-and nothing runs in the background.
+passwords or e-mail addresses, no notifications, and nothing runs in the
+background. Results are compared only within one challenge — the same board,
+the same mode — and nothing accumulates across challenges.
 
-PixApps operates none of these servers. Whoever creates a club hosts it, pays
-for it and can delete it. The product decisions live in the simple-games
-repository: `docs/PRODUCT_PRINCIPLES.md`「Shared」 draws the boundary,
-`docs/architecture/club.md` is the contract this server implements.
+Whoever creates a club hosts it, pays for it and can delete it. The product
+decisions live in the simple-games repository: `docs/PRODUCT_PRINCIPLES.md`
+「Club House」 draws the boundary, `docs/architecture/club.md` is the contract
+this server implements.
 
 **Status: pre-release.** The client side (`src/club/` in simple-games) is not
 shipped yet. This server exists so it can be built against something real.
@@ -36,6 +39,25 @@ A one-click template is planned. Until then, from this repository:
 4. Deploy. The service's public domain is picked up from
    `RAILWAY_PUBLIC_DOMAIN` and used in invite links; the dashboard link shown
    to owners is derived from the Railway project variables.
+
+### Cloudflare Workers
+
+The same server as a Worker and one SQLite-backed Durable Object, on the
+Workers Free plan ([docs/cloudflare.md](docs/cloudflare.md) has the
+architecture, the plan's limits from Cloudflare's own documentation, and the
+measured cost drivers). From this repository, with a Cloudflare account:
+
+```sh
+pnpm install
+pnpm exec wrangler login
+pnpm exec wrangler deploy                      # creates the object namespace (SQLite, fixed)
+pnpm exec wrangler secret put CLUB_SETUP_KEY   # claims the club once (below)
+```
+
+`wrangler.toml` carries the rest. The web build goes in `web/` and is served
+as static assets, free of request charges; only the API and the entry pages
+run the Worker. `CLUB_SECRET` is optional here too — without it the object
+generates one into its own storage.
 
 ### Docker, anywhere
 
@@ -86,19 +108,27 @@ server.
 
 ## Environment
 
-| Variable                  | Default            | Meaning                                                                                              |
-| ------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------- |
-| `PORT`                    | `8080`             | Listening port                                                                                       |
-| `CLUB_DATA_DIR`           | `./data` (`/data`) | The persistent directory: `club.sqlite` and `secret`                                                 |
-| `CLUB_SETUP_KEY`          | —                  | Claims the club once. Re-set it to allow one more claim                                              |
-| `CLUB_SECRET`             | generated          | Pepper for token hashes. Generated into `CLUB_DATA_DIR/secret` when absent                           |
-| `CLUB_PUBLIC_ORIGIN`      | request host       | `https://…` used in invite links. Falls back to `RAILWAY_PUBLIC_DOMAIN`, then to the request headers |
-| `CLUB_WEB_DIR`            | `./web`            | Where the Simple Games web build is served from                                                      |
-| `CLUB_CORS_ORIGINS`       | —                  | Extra allowed origins, comma-separated (a local dev server). The app origins are always allowed      |
-| `CLUB_HOSTING_PROVIDER`   | `railway` if there | A label for the owner's Hosting screen                                                               |
-| `CLUB_HOSTING_MANAGE_URL` | derived on Railway | The provider dashboard, shown to owners only                                                         |
-| `CLUB_TRUST_PROXY`        | `1`                | Read `X-Forwarded-*` (every PaaS sets them). `0` behind nothing                                      |
-| `CLUB_LOG`                | `1`                | `0` silences the one-line request log                                                                |
+The same names on both deployments — environment variables for the Node
+server, `[vars]` and secrets for the Worker. Rows marked _Node_ have no
+meaning on Workers (there is no port, no directory, no proxy in front).
+
+| Variable                  | Default               | Meaning                                                                                                                   |
+| ------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                    | `8080`                | _Node._ Listening port                                                                                                    |
+| `CLUB_DATA_DIR`           | `./data` (`/data`)    | _Node._ The persistent directory: `club.sqlite` and `secret`                                                              |
+| `CLUB_SETUP_KEY`          | —                     | Claims the club once. Re-set it to allow one more claim. A secret on Workers                                              |
+| `CLUB_SECRET`             | generated             | Pepper for token hashes. Generated into `CLUB_DATA_DIR/secret` (Node) or the object's storage (Workers) when absent       |
+| `CLUB_PUBLIC_ORIGIN`      | request host          | `https://…` used in invite links. Falls back to `RAILWAY_PUBLIC_DOMAIN`, then to the request                              |
+| `CLUB_WEB_DIR`            | `./web`               | _Node._ Where the Simple Games web build is served from (Workers: the `[assets]` directory)                               |
+| `CLUB_CORS_ORIGINS`       | —                     | Extra allowed origins, comma-separated (a local dev server). The app origins are always allowed                           |
+| `CLUB_HOSTING_PROVIDER`   | `railway` if there    | A label for the owner's Hosting screen (`cloudflare` in `wrangler.toml`)                                                  |
+| `CLUB_HOSTING_MANAGE_URL` | derived on Railway    | The provider dashboard, shown to owners only                                                                              |
+| `CLUB_TRUST_PROXY`        | `1` Node, `0` Workers | Read `X-Forwarded-*` instead of the connection (Node: every PaaS sets them; Workers: Cloudflare already names the client) |
+| `CLUB_LIMITS`             | —                     | _Workers._ A JSON object overriding entries of `src/limits.ts` for one deployment                                         |
+| `CLUB_LOG`                | `1`                   | _Node._ `0` silences the one-line request log                                                                             |
+
+`CLUB_TEST_MODE` also exists — for the test harness only, never set on a
+deployment (`test/units.test.ts` checks `wrangler.toml`).
 
 ## Web build
 
@@ -172,15 +202,28 @@ server at all.
 
 ```sh
 pnpm install
-pnpm test          # contract tests against a real server on a random port
-pnpm dev           # build, then run on :8080 with ./data
+pnpm test          # the contract tests, twice: against the Node server and against the Worker in workerd
+pnpm test:node     # one of the two
+pnpm test:workers
+pnpm dev           # build, then run the Node server on :8080 with ./data
+pnpm dev:worker    # the Worker locally (wrangler dev)
+pnpm build:worker  # bundle the Worker as a deploy would, without an account
+pnpm measure:rows  # rows read / written per request in workerd (docs/cloudflare.md §3)
 pnpm lint && pnpm typecheck && pnpm format:check
 ```
 
-Zero runtime dependencies. The database is Node's built-in `node:sqlite`
-(Node ≥ 22.13), so the image has nothing native to compile and nothing to
-keep patched; the `ExperimentalWarning` it prints is silenced in the start
-script.
+The tests start a real server per test and talk HTTP to it; `test/helpers.ts`
+starts whichever deployment `CLUB_IMPL` names, and `vitest.config.ts` runs the
+same files for both. "The same experience" on both deployments means the same
+tests, not shared code (simple-games `docs/PRODUCT_PRINCIPLES.md`「Club House」)
+— though most of the code is shared as well: `src/app.ts` and `src/worker/`
+are the only files that know what carries a request.
+
+The Node server has zero runtime dependencies. Its database is Node's
+built-in `node:sqlite` (Node ≥ 22.13), so the image has nothing native to
+compile and nothing to keep patched; the `ExperimentalWarning` it prints is
+silenced in the start script. The Worker is bundled by wrangler from the same
+sources and needs nothing at runtime either.
 
 ## License
 
