@@ -41,7 +41,7 @@ export function registerAccess(router: Router, deps: Deps): void {
       throw conflict('setup_key_used', 'the setup key does not claim this server');
     }
 
-    const now = iso(deps.now());
+    const now = iso(ctx.now);
     let club = store.getClub();
     if (club === null) {
       club = store.createClub(newId('c'), clubName ?? `${nickname}'s Club`, now);
@@ -83,7 +83,7 @@ export function registerAccess(router: Router, deps: Deps): void {
     const club = store.getClub();
     if (club === null) throw notFound('this server has not been claimed yet');
 
-    const nowIso = iso(deps.now());
+    const nowIso = iso(ctx.now);
     const invite = store.inviteByTokenHash(hashToken(config.secret, inviteToken));
     const usable =
       invite !== null &&

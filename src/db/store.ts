@@ -1,7 +1,7 @@
 /**
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
-import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
+import type { Row, SqlDriver } from './driver.js';
 
 export type Role = 'owner' | 'member';
 export type Outcome = 'completed' | 'played';
@@ -67,8 +67,6 @@ export interface RecordCandidate {
   submittedAt: string;
   facts: unknown;
 }
-
-type Row = Record<string, SQLOutputValue>;
 
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
@@ -143,64 +141,67 @@ const CHALLENGE_SELECT = `
   WHERE c.deleted_at IS NULL`;
 
 export class Store {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(private readonly db: SqlDriver) {}
 
   // ---------- club ----------
 
   getClub(): ClubRow | null {
-    const row = this.db.prepare(`SELECT * FROM club LIMIT 1`).get();
+    const row = this.db.get(`SELECT * FROM club LIMIT 1`);
     return row === undefined ? null : toClub(row);
   }
 
   createClub(id: string, name: string, now: string): ClubRow {
-    this.db
-      .prepare(`INSERT INTO club (id, name, created_at, last_activity_at) VALUES (?, ?, ?, ?)`)
-      .run(id, name, now, now);
+    this.db.run(
+      `INSERT INTO club (id, name, created_at, last_activity_at) VALUES (?, ?, ?, ?)`,
+      id,
+      name,
+      now,
+      now,
+    );
     return { id, name, createdAt: now, referralUrl: null, lastActivityAt: now };
   }
 
   renameClub(name: string): void {
-    this.db.prepare(`UPDATE club SET name = ?`).run(name);
+    this.db.run(`UPDATE club SET name = ?`, name);
   }
 
   setReferralUrl(url: string | null): void {
-    this.db.prepare(`UPDATE club SET referral_url = ?`).run(url);
+    this.db.run(`UPDATE club SET referral_url = ?`, url);
   }
 
   /** Every write a member makes moves `lastActivityAt` (club.md §5-2 Hosting). */
   touchActivity(now: string): void {
-    this.db.prepare(`UPDATE club SET last_activity_at = ?`).run(now);
+    this.db.run(`UPDATE club SET last_activity_at = ?`, now);
   }
 
   // ---------- members ----------
 
   activeMembers(): MemberRow[] {
-    return this.db
-      .prepare(`SELECT * FROM members WHERE revoked_at IS NULL ORDER BY seq`)
-      .all()
-      .map(toMember);
+    return this.db.all(`SELECT * FROM members WHERE revoked_at IS NULL ORDER BY seq`).map(toMember);
   }
 
   memberById(id: string): MemberRow | null {
-    const row = this.db.prepare(`SELECT * FROM members WHERE id = ?`).get(id);
+    const row = this.db.get(`SELECT * FROM members WHERE id = ?`, id);
     return row === undefined ? null : toMember(row);
   }
 
   /** Active members only — a revoked token is a 401, not a ghost (club.md §5-3). */
   memberByTokenHash(hash: string): MemberRow | null {
-    const row = this.db
-      .prepare(`SELECT * FROM members WHERE token_hash = ? AND revoked_at IS NULL`)
-      .get(hash);
+    const row = this.db.get(
+      `SELECT * FROM members WHERE token_hash = ? AND revoked_at IS NULL`,
+      hash,
+    );
     return row === undefined ? null : toMember(row);
   }
 
   countActive(role?: Role): number {
     const row =
       role === undefined
-        ? this.db.prepare(`SELECT COUNT(*) AS n FROM members WHERE revoked_at IS NULL`).get()
-        : this.db
-            .prepare(`SELECT COUNT(*) AS n FROM members WHERE revoked_at IS NULL AND role = ?`)
-            .get(role);
+        ? this.db.get(`SELECT COUNT(*) AS n FROM members WHERE revoked_at IS NULL`)
+        : this.db.get(
+            `SELECT COUNT(*) AS n FROM members WHERE revoked_at IS NULL AND role = ?`,
+            role,
+          );
     return row === undefined ? 0 : int(row, 'n');
   }
 
@@ -211,50 +212,54 @@ export class Store {
     tokenHash: string,
     now: string,
   ): MemberRow {
-    this.db
-      .prepare(
-        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(id, nickname, role, now, tokenHash);
+    this.db.run(
+      `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, ?, ?, ?)`,
+      id,
+      nickname,
+      role,
+      now,
+      tokenHash,
+    );
     return { id, nickname, role, joinedAt: now, revokedAt: null };
   }
 
   revokeMember(id: string, now: string): void {
-    this.db.prepare(`UPDATE members SET revoked_at = ? WHERE id = ?`).run(now, id);
+    this.db.run(`UPDATE members SET revoked_at = ? WHERE id = ?`, now, id);
   }
 
   // ---------- setup key ----------
 
   isSetupKeyUsed(hash: string): boolean {
-    return this.db.prepare(`SELECT 1 FROM setup_keys_used WHERE hash = ?`).get(hash) !== undefined;
+    return this.db.get(`SELECT 1 FROM setup_keys_used WHERE hash = ?`, hash) !== undefined;
   }
 
   markSetupKeyUsed(hash: string, now: string): void {
-    this.db.prepare(`INSERT INTO setup_keys_used (hash, used_at) VALUES (?, ?)`).run(hash, now);
+    this.db.run(`INSERT INTO setup_keys_used (hash, used_at) VALUES (?, ?)`, hash, now);
   }
 
   // ---------- invites ----------
 
   /** The current member invite — the one the owner hands out. */
   memberInvite(): InviteRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM invites WHERE role = 'member' AND revoked_at IS NULL ORDER BY seq DESC`,
-      )
-      .get();
+    const row = this.db.get(
+      `SELECT * FROM invites WHERE role = 'member' AND revoked_at IS NULL ORDER BY seq DESC`,
+    );
     return row === undefined ? null : toInvite(row);
   }
 
   /** Rotates: the previous member invite stops working the moment the new one exists. */
   replaceMemberInvite(id: string, token: string, tokenHash: string, now: string): InviteRow {
-    this.db
-      .prepare(`UPDATE invites SET revoked_at = ? WHERE role = 'member' AND revoked_at IS NULL`)
-      .run(now);
-    this.db
-      .prepare(
-        `INSERT INTO invites (id, role, token, token_hash, created_at) VALUES (?, 'member', ?, ?, ?)`,
-      )
-      .run(id, token, tokenHash, now);
+    this.db.run(
+      `UPDATE invites SET revoked_at = ? WHERE role = 'member' AND revoked_at IS NULL`,
+      now,
+    );
+    this.db.run(
+      `INSERT INTO invites (id, role, token, token_hash, created_at) VALUES (?, 'member', ?, ?, ?)`,
+      id,
+      token,
+      tokenHash,
+      now,
+    );
     return {
       id,
       role: 'member',
@@ -269,11 +274,13 @@ export class Store {
 
   /** An owner link: hashed, one use, with an expiry (club.md §8-3). */
   createOwnerInvite(id: string, tokenHash: string, now: string, expiresAt: string): InviteRow {
-    this.db
-      .prepare(
-        `INSERT INTO invites (id, role, token_hash, created_at, expires_at) VALUES (?, 'owner', ?, ?, ?)`,
-      )
-      .run(id, tokenHash, now, expiresAt);
+    this.db.run(
+      `INSERT INTO invites (id, role, token_hash, created_at, expires_at) VALUES (?, 'owner', ?, ?, ?)`,
+      id,
+      tokenHash,
+      now,
+      expiresAt,
+    );
     return {
       id,
       role: 'owner',
@@ -287,12 +294,12 @@ export class Store {
   }
 
   inviteByTokenHash(hash: string): InviteRow | null {
-    const row = this.db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hash);
+    const row = this.db.get(`SELECT * FROM invites WHERE token_hash = ?`, hash);
     return row === undefined ? null : toInvite(row);
   }
 
   markInviteUsed(id: string, now: string): void {
-    this.db.prepare(`UPDATE invites SET used_at = ? WHERE id = ?`).run(now, id);
+    this.db.run(`UPDATE invites SET used_at = ? WHERE id = ?`, now, id);
   }
 
   // ---------- challenges ----------
@@ -308,27 +315,24 @@ export class Store {
     createdBy: string;
     now: string;
   }): void {
-    this.db
-      .prepare(
-        `INSERT INTO challenges
+    this.db.run(
+      `INSERT INTO challenges
            (id, game_id, contract_version, params_json, seed, board_digest, title, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.id,
-        input.gameId,
-        input.contractVersion,
-        JSON.stringify(input.params),
-        input.seed,
-        input.boardDigest,
-        input.title,
-        input.createdBy,
-        input.now,
-      );
+      input.id,
+      input.gameId,
+      input.contractVersion,
+      JSON.stringify(input.params),
+      input.seed,
+      input.boardDigest,
+      input.title,
+      input.createdBy,
+      input.now,
+    );
   }
 
   challengeById(id: string, viewerId: string): ChallengeRow | null {
-    const row = this.db.prepare(`${CHALLENGE_SELECT} AND c.id = ?`).get(viewerId, id);
+    const row = this.db.get(`${CHALLENGE_SELECT} AND c.id = ?`, viewerId, id);
     return row === undefined ? null : toChallenge(row);
   }
 
@@ -336,19 +340,20 @@ export class Store {
   listChallenges(viewerId: string, afterId: string | null, limit: number): ChallengeRow[] {
     const rows =
       afterId === null
-        ? this.db.prepare(`${CHALLENGE_SELECT} ORDER BY c.seq DESC LIMIT ?`).all(viewerId, limit)
-        : this.db
-            .prepare(
-              `${CHALLENGE_SELECT}
+        ? this.db.all(`${CHALLENGE_SELECT} ORDER BY c.seq DESC LIMIT ?`, viewerId, limit)
+        : this.db.all(
+            `${CHALLENGE_SELECT}
                  AND c.seq < (SELECT seq FROM challenges WHERE id = ?)
                ORDER BY c.seq DESC LIMIT ?`,
-            )
-            .all(viewerId, afterId, limit);
+            viewerId,
+            afterId,
+            limit,
+          );
     return rows.map(toChallenge);
   }
 
   deleteChallenge(id: string, now: string): void {
-    this.db.prepare(`UPDATE challenges SET deleted_at = ? WHERE id = ?`).run(now, id);
+    this.db.run(`UPDATE challenges SET deleted_at = ? WHERE id = ?`, now, id);
   }
 
   // ---------- results ----------
@@ -356,16 +361,17 @@ export class Store {
   /** Submission order (club.md §5-3); the client orders by the game's axis. */
   results(challengeId: string, limit: number): ResultRow[] {
     return this.db
-      .prepare(`SELECT * FROM results WHERE challenge_id = ? ORDER BY seq LIMIT ?`)
-      .all(challengeId, limit)
+      .all(`SELECT * FROM results WHERE challenge_id = ? ORDER BY seq LIMIT ?`, challengeId, limit)
       .map(toResult);
   }
 
   hasResult(challengeId: string, memberId: string): boolean {
     return (
-      this.db
-        .prepare(`SELECT 1 FROM results WHERE challenge_id = ? AND member_id = ?`)
-        .get(challengeId, memberId) !== undefined
+      this.db.get(
+        `SELECT 1 FROM results WHERE challenge_id = ? AND member_id = ?`,
+        challengeId,
+        memberId,
+      ) !== undefined
     );
   }
 
@@ -377,19 +383,16 @@ export class Store {
     outcome: Outcome;
     facts: unknown;
   }): ResultRow {
-    this.db
-      .prepare(
-        `INSERT INTO results (challenge_id, member_id, nickname, submitted_at, outcome, facts_json)
+    this.db.run(
+      `INSERT INTO results (challenge_id, member_id, nickname, submitted_at, outcome, facts_json)
          VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.challengeId,
-        input.memberId,
-        input.nickname,
-        input.now,
-        input.outcome,
-        JSON.stringify(input.facts),
-      );
+      input.challengeId,
+      input.memberId,
+      input.nickname,
+      input.now,
+      input.outcome,
+      JSON.stringify(input.facts),
+    );
     return {
       challengeId: input.challengeId,
       memberId: input.memberId,
@@ -403,7 +406,7 @@ export class Store {
   /** Every completed result on a live challenge, oldest first — the records input. */
   completedResultsForRecords(): RecordCandidate[] {
     return this.db
-      .prepare(
+      .all(
         `SELECT r.challenge_id, r.member_id, r.nickname, r.submitted_at, r.facts_json,
                 c.game_id, c.params_json
          FROM results r
@@ -411,7 +414,6 @@ export class Store {
          WHERE r.outcome = 'completed' AND c.deleted_at IS NULL
          ORDER BY r.seq`,
       )
-      .all()
       .map((row) => ({
         gameId: text(row, 'game_id'),
         params: parseJson(text(row, 'params_json')),

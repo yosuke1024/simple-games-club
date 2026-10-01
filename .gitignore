@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+dist-worker/
+.wrangler/
 coverage/
 
 # Local data (the SQLite file and the generated secret live on the volume, never in git)
@@ -24,3 +26,5 @@ web/*
 .env
 .env.*
 !.env.example
+.dev.vars
+!web/.assetsignore

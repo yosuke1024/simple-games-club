@@ -11,7 +11,7 @@ import { openDatabase } from './db/database.js';
 
 const config = loadConfig();
 const db = openDatabase(join(config.dataDir, 'club.sqlite'));
-const app = createApp({ config, db });
+const app = createApp({ config, db: db.driver });
 const server = createServer(app.handle);
 
 server.listen(config.port, config.host, () => {

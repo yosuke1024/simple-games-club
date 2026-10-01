@@ -7,33 +7,24 @@
  * lives, which setup key claims the club, and how the hosting dashboard is
  * reached — so that a one-click template can fill it all in.
  */
-import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { randomHex } from './auth/tokens.js';
 
-export interface HostingConfig {
-  /** `'railway'` and the like — a label for the client's Hosting screen. */
-  provider: string | null;
-  /** The provider's dashboard for this server. Shown to owners only (club.md §8-4). */
-  manageUrl: string | null;
-}
+import type { ApiConfig, HostingConfig } from './api/deps.js';
 
-export interface Config {
+export type { HostingConfig };
+
+/** The Node deployment's whole environment: what the API reads (ApiConfig) plus the process's own. */
+export interface Config extends ApiConfig {
   port: number;
   host: string;
   /** The one persistent directory: the SQLite file and the generated secret. */
   dataDir: string;
   /** Where the Simple Games web build is served from (`/` and `/join`). */
   webDir: string;
-  /** `CLUB_SETUP_KEY` — the key a device pastes at deploy time and claims with once. */
-  setupKey: string | null;
-  /** Pepper for every token hash. Generated into `dataDir` when not provided. */
-  secret: string;
   /** `https://club.example.com` — used to build invite URLs; falls back to the request host. */
   publicOrigin: string | null;
-  /** Extra CORS origins on top of the fixed three (club.md §5-1), e.g. a local Vite dev server. */
-  corsOrigins: readonly string[];
-  hosting: HostingConfig;
   /** Read `X-Forwarded-*` from the platform's proxy (on by default: every PaaS sets them). */
   trustProxy: boolean;
   log: boolean;
@@ -85,7 +76,7 @@ function loadOrCreateSecret(dataDir: string): string {
     const stored = readFileSync(path, 'utf8').trim();
     if (stored !== '') return stored;
   }
-  const secret = randomBytes(32).toString('hex');
+  const secret = randomHex(32);
   writeFileSync(path, `${secret}\n`, { mode: 0o600 });
   return secret;
 }

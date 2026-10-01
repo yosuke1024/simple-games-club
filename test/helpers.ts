@@ -1,16 +1,11 @@
 /**
- * A real server on a random port, per test. Nothing is mocked: requests go
- * over HTTP, rows go into a SQLite file in a temp directory, and the clock
- * is the one injectable — so a test can walk past an owner link's expiry.
+ * A real server on a random port, per test, for whichever deployment
+ * `CLUB_IMPL` names (vitest.config.ts): the Node process (test/impl/node.ts)
+ * or the Worker and its Durable Object in workerd (test/impl/workers.ts).
+ * Nothing is mocked: requests go over HTTP and rows go into SQLite. The
+ * clock is the one injectable, so a test can walk past an owner link's expiry.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
-import { createApp } from '../src/app.js';
-import type { Config, HostingConfig } from '../src/config.js';
-import { openDatabase } from '../src/db/database.js';
+import type { HostingConfig } from '../src/api/deps.js';
 import type { Limits } from '../src/limits.js';
 
 export const SETUP_KEY = 'test-setup-key-0123456789abcdef';
@@ -34,11 +29,14 @@ export interface Reply {
   text: string;
 }
 
+export interface Clock {
+  now: Date;
+  advance(ms: number): void;
+}
+
 export interface TestServer {
   url: string;
-  dir: string;
-  config: Config;
-  clock: { now: Date; advance(ms: number): void };
+  clock: Clock;
   api(path: string, init?: RequestInit_): Promise<Reply>;
   /** Restarts the server on the same database, optionally with new env-like settings. */
   reopen(overrides?: Partial<ServerOptions>): Promise<void>;
@@ -54,7 +52,7 @@ export interface ServerOptions {
   hosting: HostingConfig;
 }
 
-const DEFAULTS: ServerOptions = {
+export const DEFAULTS: ServerOptions = {
   setupKey: SETUP_KEY,
   limits: {},
   webDir: null,
@@ -63,100 +61,48 @@ const DEFAULTS: ServerOptions = {
   hosting: { provider: null, manageUrl: null },
 };
 
-export async function startServer(overrides: Partial<ServerOptions> = {}): Promise<TestServer> {
-  const dir = mkdtempSync(join(tmpdir(), 'sg-club-'));
-  const clock = {
-    now: new Date(START),
-    advance(ms: number) {
-      this.now = new Date(this.now.getTime() + ms);
-    },
-  };
-  let options: ServerOptions = { ...DEFAULTS, ...overrides };
-  let db: DatabaseSync | null = null;
-  let server: Server | null = null;
-  let config: Config | null = null;
-  let url = '';
+export const newClock = (): Clock => ({
+  now: new Date(START),
+  advance(ms: number) {
+    this.now = new Date(this.now.getTime() + ms);
+  },
+});
 
-  const listen = async (): Promise<void> => {
-    config = {
-      port: 0,
-      host: '127.0.0.1',
-      dataDir: dir,
-      webDir: options.webDir ?? join(dir, 'web-missing'),
-      setupKey: options.setupKey,
-      secret: 'test-secret',
-      publicOrigin: options.publicOrigin,
-      corsOrigins: options.corsOrigins,
-      hosting: options.hosting,
-      trustProxy: true,
-      log: false,
-    };
-    db = openDatabase(join(dir, 'club.sqlite'));
-    const app = createApp({ config, db, now: () => new Date(clock.now), limits: options.limits });
-    server = createServer(app.handle);
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
-    const address = server.address();
-    if (address === null || typeof address === 'string') throw new Error('no port');
-    url = `http://127.0.0.1:${address.port}`;
-  };
-
-  const stop = async (): Promise<void> => {
-    if (server !== null) {
-      const closing = server;
-      server = null;
-      await new Promise<void>((resolve, reject) =>
-        closing.close((error) => (error ? reject(error) : resolve())),
-      );
+/** The `api()` of a TestServer: JSON in, status + headers + parsed JSON out. */
+export const apiCaller =
+  (url: () => string, extraHeaders: () => Record<string, string> = () => ({})) =>
+  async (path: string, init: RequestInit_ = {}): Promise<Reply> => {
+    const headers: Record<string, string> = { ...extraHeaders(), ...init.headers };
+    if (init.token !== undefined) headers.Authorization = `Bearer ${init.token}`;
+    let body: string | undefined;
+    if (init.raw !== undefined) {
+      body = init.raw;
+    } else if (init.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify(init.body);
     }
-    db?.close();
-    db = null;
+    const response = await fetch(`${url()}${path}`, {
+      method: init.method ?? (body === undefined ? 'GET' : 'POST'),
+      headers,
+      body,
+    });
+    const text = await response.text();
+    const isJson = (response.headers.get('content-type') ?? '').startsWith('application/json');
+    return {
+      status: response.status,
+      headers: response.headers,
+      json: isJson && text !== '' ? JSON.parse(text) : null,
+      text,
+    };
   };
 
-  await listen();
-
-  return {
-    get url() {
-      return url;
-    },
-    dir,
-    get config() {
-      return config!;
-    },
-    clock,
-    async api(path, init = {}) {
-      const headers: Record<string, string> = { ...init.headers };
-      if (init.token !== undefined) headers.Authorization = `Bearer ${init.token}`;
-      let body: string | undefined;
-      if (init.raw !== undefined) {
-        body = init.raw;
-      } else if (init.body !== undefined) {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify(init.body);
-      }
-      const response = await fetch(`${url}${path}`, {
-        method: init.method ?? (body === undefined ? 'GET' : 'POST'),
-        headers,
-        body,
-      });
-      const text = await response.text();
-      const isJson = (response.headers.get('content-type') ?? '').startsWith('application/json');
-      return {
-        status: response.status,
-        headers: response.headers,
-        json: isJson && text !== '' ? JSON.parse(text) : null,
-        text,
-      };
-    },
-    async reopen(next = {}) {
-      await stop();
-      options = { ...options, ...next };
-      await listen();
-    },
-    async close() {
-      await stop();
-      rmSync(dir, { recursive: true, force: true });
-    },
-  };
+export async function startServer(overrides: Partial<ServerOptions> = {}): Promise<TestServer> {
+  if (process.env.CLUB_IMPL === 'workers') {
+    const { startWorkersServer } = await import('./impl/workers.js');
+    return startWorkersServer(overrides);
+  }
+  const { startNodeServer } = await import('./impl/node.js');
+  return startNodeServer(overrides);
 }
 
 export interface Session {
