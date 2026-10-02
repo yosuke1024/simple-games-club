@@ -105,15 +105,18 @@ Measured 2026-10-01, workerd compatibility date 2026-09-01:
 
 ### `GET /public` (the landing page's view)
 
-`GET /api/v1/public` (club.md §18) reads the `ranking_tables` summary joined to each
-leader's row (the number of tables, as `GET /rankings`), the day's `daily` challenges
-through the `challenges_daily` index, and, for each of them, a scan of its results to
-find the top three by the game's axis (`json_extract` in SQLite, three rows returned).
-That scan grows with the day's results, so it is not left to the traffic: the Worker
-answers from `caches.default` for five minutes (`Cache-Control: public, max-age=300`),
-and a cache hit never reaches the object. One cached copy per date (and per allowed
-origin), however many pages ask, is at most one object request each five minutes.
-Not measured separately from the table above.
+_Measured 2026-10-01; this subsection was rewritten on 2026-10-02 for schema 5 (auto-sync) and its read costs are the ones in the 2026-10-02 section below._
+
+`GET /api/v1/public` (club.md §18) reads the day's `daily` challenges through the
+`challenges_daily` index and, for each, the best three results off the `results_rank`
+index; the eight most-entered tables off the `ranking_tables_popular` index (so the cost
+is eight summary rows, not the number of tables) and, for each, its best three entries off
+the `(game_id, params_key, value, seq)` index; and the member count. Since the auto-sync
+change (schema 5) none of that scans a challenge's results or the table list — see the
+measurements after "Fixed in plan PR C" below, which also name what still grows with the
+club. The Worker answers from `caches.default` for five minutes (`Cache-Control: public,
+max-age=300`), and a cache hit never reaches the object. One cached copy per date (and per
+allowed origin), however many pages ask, is at most one object request each five minutes.
 
 ### One club, request by request
 
@@ -171,6 +174,85 @@ Writes rise by the bookkeeping: `POST /challenges` 7 → 11 rows written, `POST
 (the row, the creator's name, the viewer's own-result probe) and the records read two rows
 whatever the club's size. §7's production numbers predate this change; measuring it in
 production is plan PR F's.
+
+**Auto-sync: ordered results and the public top (2026-10-02, schema 5).** Every result a
+member finishes is now sent to the club on its own, so a daily challenge can hold as many
+results as the club has members (10,000 on the Public deployment, `wrangler.toml`), and
+two reads that scanned a challenge's results had to stop doing so: `GET
+/challenges/:id/results` (the first 200 by arrival, which is not the best 200 once there
+are more) and the top three per daily in `GET /public`. `results` gained `rank_class` and
+`rank_key` — where a result sorts, written with the result from the game's contract
+(`resultRank`, src/contracts/games.ts) — and the index `results_rank (challenge_id,
+rank_class, rank_key)`; `ranking_tables` gained `ranking_tables_popular (entry_count DESC,
+game_id, params_key)`. The figures below came from a one-off test of the Workers harness
+(workerd, one club of 60 members, 31 ranking tables, a 60-result daily), run once against
+the bundle of `origin/claude/rankings-to-main` (before) and once against this change
+(after), reading the object's per-request `X-Club-Rows` header — the cursors' `rowsRead` /
+`rowsWritten`. That test is not checked in, and `pnpm measure:rows`
+(`scripts/measure-rows.mjs`, 20 members, none of these steps) does not reproduce the table.
+To repeat it, send the same requests through `startServer()` of `test/helpers.js` on a
+Workers project and read the header; the bounds themselves are pinned by checked-in tests
+(`test/results-order.test.ts`, `test/public.test.ts`, Workers only). Rows as reported:
+
+| Step                                                        | Rows read before | Rows read after | Rows written before | Rows written after |
+| ----------------------------------------------------------- | ---------------: | --------------: | ------------------: | -----------------: |
+| `POST /challenges`, a daily's first result                  |               11 |              11 |                  10 |                 11 |
+| `POST /challenges/:id/results`                              |                9 |               9 |                   5 |                  6 |
+| `GET /challenges/:id/results`, 10 results (page 200)        |               26 |              15 |                   0 |                  0 |
+| `GET /challenges/:id/results`, 60 results (page 200)        |              126 |              65 |                   0 |                  0 |
+| `POST /rankings/results`, first entry of a table            |                4 |               4 |                   8 |                  9 |
+| `POST /rankings/results`, a new entry, not the leader       |                9 |               9 |                   6 |                  7 |
+| `POST /rankings/results`, a member improves their own entry |               10 |               9 |                   5 |                  4 |
+| `GET /public`, 31 tables, a daily of 60 results, 60 members |              249 |              97 |                   0 |                  0 |
+| `GET /public`, the same on a day with no daily              |              126 |              93 |                   0 |                  0 |
+
+What the table says, and what it does not:
+
+- **A result costs one more row written** (the `results_rank` entry): 5 → 6 for a member's
+  result, so the day's 100,000 written rows hold about 16,000 results instead of 20,000
+  (the 25,000 of §4 predates PR C's bookkeeping). A new ranking entry costs one more too
+  (a table's count is in `ranking_tables_popular`); an improvement of one's own entry costs
+  one less, because it no longer rewrites the summary row's count.
+- **The best-N read is bounded by the page, not the challenge**: `limit` rows off the index
+  plus, when the asker ranks below them, one lookup of their own row by the unique
+  `(challenge_id, member_id)` index. Measured with a page of 5 and 10 or 60 answers
+  (`test/results-order.test.ts`, Workers only): 10 rows read either way. The 60-result
+  figure above has the default page of 200, so it still returns every result; the saving
+  shows at club sizes past 200.
+- **The public rankings are bounded by eight tables and three entries each**: with 12 or
+  72 tables the object reads the same (`test/public.test.ts`, Workers only). A
+  higher-is-better table (scores) is read in three bounded steps — the value at the third
+  place, the entries above it, the earliest of those tied at it (`rankingTop`) — because a
+  single ordered read would walk the whole group tied at the cut, and a capped score ties in
+  hundreds. The same test pins that 3 or 22 entries tied at the third place read the same rows.
+- **One thing still grows with the club, and was not changed here: the member count.**
+  `GET /public`'s `memberCount` is `COUNT(*)` over the active members — a full scan, 61 of
+  the 97 rows above (an empty club's `GET /public` reads 3 rows; one with 61 members, 63) —
+  so up to 10,000 rows per uncached call at the Public member cap, and the same count runs
+  on every `POST /join`. One uncached call per five minutes would be 2.9 million rows read a
+  day of the free plan's 5 million, but that is a floor, not a forecast: `caches.default` is
+  per data centre, and the cache key varies by `?date=` and by origin, so the real number of
+  misses is a multiple of it. **This is a blocker for raising the member cap toward 10,000**:
+  keep a member counter row, as `challenges.result_count` is kept, before then.
+- **The upgrade is one way, and not repeatable by redeploy.** The object migrates itself to
+  schema 5 on its first request after the deploy (`upgradeToV5`: two columns, every existing
+  result's rank computed by `rerankResults` — the same `resultRank` a new result goes through
+  — and two indexes; rows written proportional to the results stored). A server older than
+  this refuses a schema it does not know (`database schema 5 is newer than this server`), so
+  rolling the Worker back after the first request needs a restore, not a redeploy. The upgrade
+  was run once in workerd on a database persisted by the bundle of
+  `origin/claude/rankings-to-main` (schema 4, results in arrival order, a boolean axis, a
+  played result): the first request after the reopen listed the results best first and
+  `/public` the right top three, a new member could submit, and a second reopen changed
+  nothing. That check is a one-off script, not a checked-in test (the Workers harness always
+  starts from an empty object); the same upgrade is tested on node:sqlite in
+  `test/migrate.test.ts`.
+- **A change to the game contracts is a schema change.** A result's rank is written when it
+  arrives, from `GAME_CONTRACTS` (src/contracts/games.ts). Adding a game, or changing an
+  axis or a direction there, leaves the results already stored with the old rank (their
+  best-N order goes stale, and a result without `rank_class` 0 is missing from `/public`'s
+  daily top three). Ship such a change with a schema bump whose upgrade calls
+  `rerankResults(db)` (src/db/driver.ts), which rewrites only the rows whose rank changed.
 
 ## 4. Where the free plan's ceilings fall (arithmetic, not a forecast)
 

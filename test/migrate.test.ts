@@ -3,7 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { migrate, upgradeToV3, upgradeToV4, type SqlDriver } from '../src/db/driver.js';
+import { resultRank } from '../src/contracts/games.js';
+import {
+  migrate,
+  upgradeToV3,
+  upgradeToV4,
+  rerankResults,
+  upgradeToV5,
+  type SqlDriver,
+} from '../src/db/driver.js';
 
 // The schema as v1 shipped it, copied here: the upgrade must work on exactly this.
 const V1_SCHEMA = `
@@ -78,7 +86,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('5');
     expect(d.get(`SELECT result_count, daily FROM challenges WHERE id = 'ch1'`)).toEqual({
       result_count: 2,
       daily: null,
@@ -112,7 +120,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('5');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'records'`)).toBeUndefined();
     expect(d.all(`SELECT * FROM ranking_entries`)).toEqual([]);
     expect(
@@ -222,6 +230,134 @@ describe('migrate() from schema 1', () => {
     expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'members_reported'`)).toBeDefined();
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'challenges_daily'`)).toBeDefined();
+  });
+
+  it('upgradeToV5 ranks every result like resultRank does, adds the indexes, and runs again to the same result', () => {
+    dir = mkdtempSync(join(tmpdir(), 'sg-club-migrate-'));
+    db = new DatabaseSync(join(dir, 'club.sqlite'));
+    const d: SqlDriver = {
+      exec: (script) => db.exec(script),
+      run: (sql, ...params) => {
+        db.prepare(sql).run(...params);
+      },
+      get: (sql, ...params) => db.prepare(sql).get(...params),
+      all: (sql, ...params) => db.prepare(sql).all(...params),
+    };
+    migrate(d); // a current database…
+    d.exec(`DROP INDEX results_rank`);
+    d.exec(`DROP INDEX ranking_tables_popular`);
+    d.exec(`ALTER TABLE results DROP COLUMN rank_class`);
+    d.exec(`ALTER TABLE results DROP COLUMN rank_key`);
+    d.run(`UPDATE meta SET value = '4' WHERE key = 'schema_version'`); // …made to look like v4
+    for (const id of ['a', 'b', 'c', 'e', 'f', 'g', 'h']) {
+      d.run(
+        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+        id,
+        id,
+        `h${id}`,
+      );
+    }
+    for (const game of ['sudoku', '2048', 'hearts', 'checkers', 'water-sort']) {
+      d.run(
+        `INSERT INTO challenges (id, game_id, contract_version, params_json, seed, board_digest, created_by, created_at)
+         VALUES (?, ?, 1, '{}', 's', ?, 'a', 't')`,
+        `ch-${game}`,
+        game,
+        `d-${game}`,
+      );
+    }
+    const put = (game: string, member: string, outcome: string, facts: string) =>
+      d.run(
+        `INSERT INTO results (challenge_id, member_id, nickname, submitted_at, outcome, facts_json)
+         VALUES (?, ?, ?, 't', ?, ?)`,
+        `ch-${game}`,
+        member,
+        member,
+        outcome,
+        facts,
+      );
+    put('sudoku', 'a', 'completed', '{"elapsedSeconds":300}');
+    put('sudoku', 'b', 'completed', '{"elapsedSeconds":12.5,"mistakes":1}');
+    put('sudoku', 'c', 'completed', '{"mistakes":2}'); // no axis
+    put('sudoku', 'e', 'played', '{"elapsedSeconds":1}'); // never ranked
+    // SQLite's json_extract reads a JSON boolean as the integer 1/0; resultRank must not.
+    put('sudoku', 'f', 'completed', '{"elapsedSeconds":true}');
+    put('sudoku', 'g', 'completed', '{"elapsedSeconds":false}');
+    put('sudoku', 'h', 'completed', 'not json');
+    put('2048', 'a', 'completed', '{"score":0}');
+    put('2048', 'b', 'completed', '{"score":4096}');
+    put('2048', 'c', 'completed', '{"score":"high"}'); // not a number
+    put('hearts', 'a', 'completed', '{"score":-3}');
+    put('hearts', 'b', 'completed', '{"score":20}');
+    put('checkers', 'a', 'completed', '{"turns":40}'); // no contract
+    put('checkers', 'b', 'played', '{}');
+    put('water-sort', 'a', 'completed', '{"moves":31}');
+
+    migrate(d);
+    migrate(d);
+    upgradeToV5(d);
+
+    const rows = d.all(
+      `SELECT r.rank_class, r.rank_key, r.outcome, r.facts_json, c.game_id
+       FROM results r JOIN challenges c ON c.id = r.challenge_id`,
+    );
+    expect(rows).toHaveLength(15);
+    for (const row of rows) {
+      const expected = resultRank(
+        String(row.game_id),
+        String(row.outcome),
+        (() => {
+          try {
+            return JSON.parse(String(row.facts_json));
+          } catch {
+            return null; // the one unreadable row above
+          }
+        })(),
+      );
+      expect(
+        { rank_class: row.rank_class, rank_key: row.rank_key },
+        String(row.facts_json),
+      ).toEqual({ rank_class: expected.rankClass, rank_key: expected.rankKey });
+    }
+    // The cases are not all the trivial class: ascending, descending (negated), none, played.
+    const keyOf = (game: string, member: string) =>
+      d.get(
+        `SELECT rank_class, rank_key FROM results WHERE challenge_id = ? AND member_id = ?`,
+        `ch-${game}`,
+        member,
+      );
+    expect(keyOf('sudoku', 'b')).toEqual({ rank_class: 0, rank_key: 12.5 });
+    expect(keyOf('2048', 'b')).toEqual({ rank_class: 0, rank_key: -4096 });
+    expect(keyOf('2048', 'a')).toEqual({ rank_class: 0, rank_key: 0 });
+    expect(keyOf('hearts', 'a')).toEqual({ rank_class: 0, rank_key: -3 });
+    expect(keyOf('sudoku', 'c')).toEqual({ rank_class: 1, rank_key: null });
+    expect(keyOf('checkers', 'a')).toEqual({ rank_class: 1, rank_key: null });
+    expect(keyOf('sudoku', 'e')).toEqual({ rank_class: 2, rank_key: null });
+    expect(keyOf('sudoku', 'f')).toEqual({ rank_class: 1, rank_key: null });
+    expect(keyOf('sudoku', 'g')).toEqual({ rank_class: 1, rank_key: null });
+    expect(keyOf('sudoku', 'h')).toEqual({ rank_class: 1, rank_key: null });
+
+    // rerankResults puts a stale rank right, and leaves a right one alone.
+    d.run(`UPDATE results SET rank_class = 2, rank_key = 99 WHERE member_id = 'b'`);
+    rerankResults(d);
+    expect(keyOf('sudoku', 'b')).toEqual({ rank_class: 0, rank_key: 12.5 });
+    expect(keyOf('2048', 'b')).toEqual({ rank_class: 0, rank_key: -4096 });
+
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('5');
+    // The best-N read and the most-entered tables are read off their indexes, with no sort.
+    const plan = (sql: string) =>
+      d.all(`EXPLAIN QUERY PLAN ${sql}`).map((row) => String(row.detail));
+    expect(
+      plan(
+        `SELECT * FROM results WHERE challenge_id = 'x' ORDER BY rank_class, rank_key, seq LIMIT 5`,
+      ),
+    ).toEqual([expect.stringContaining('results_rank')]);
+    expect(
+      plan(
+        `SELECT game_id, params_key, entry_count FROM ranking_tables
+         ORDER BY entry_count DESC, game_id, params_key LIMIT 8`,
+      ),
+    ).toEqual([expect.stringContaining('ranking_tables_popular')]);
   });
 
   it('refuses a database newer than this server', () => {

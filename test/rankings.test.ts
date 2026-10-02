@@ -136,6 +136,10 @@ describe('POST /api/v1/rankings/results (club.md §16)', () => {
   it('rejects an unknown game, a missing axis, a bad paramsKey and a bad version', async () => {
     expect((await send(yoh, { elapsedSeconds: 1 }, { gameId: 'chess' })).status).toBe(400);
     expect((await send(yoh, { elapsedSeconds: 1 }, { gameId: 'gomoku' })).status).toBe(400);
+    // Ids of Object.prototype members pass the gameId shape and must not find a contract.
+    for (const gameId of ['constructor', 'toString', 'hasownproperty', '__proto__']) {
+      expect((await send(yoh, { undefined: 5 }, { gameId })).status, gameId).toBe(400);
+    }
     expect((await send(yoh, { moves: 3 })).status).toBe(400);
     expect((await send(yoh, { elapsedSeconds: 'fast' })).status).toBe(400);
     expect((await send(yoh, { elapsedSeconds: 1 }, { paramsKey: 'Hard!' })).status).toBe(400);

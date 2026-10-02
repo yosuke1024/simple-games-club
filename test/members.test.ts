@@ -336,7 +336,8 @@ describe('DELETE /api/v1/members/:id?purge=1 (club.md §17-3)', () => {
       (await server.api(`/api/v1/challenges/${id}`, { token: owner.token })).json.resultCount,
     ).toBe(2);
     const results = await server.api(`/api/v1/challenges/${id}/results`, { token: owner.token });
-    expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Yoh', 'Mai']);
+    // Best first: Mai's 250 s before Yoh's 300 s.
+    expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Mai', 'Yoh']);
 
     const tables = await server.api('/api/v1/rankings', { token: owner.token });
     // 2048/default had only Ken: gone. sudoku/hard: two rows, Mai leads now.

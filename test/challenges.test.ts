@@ -249,9 +249,10 @@ describe('one challenge per board (club.md §6-3)', () => {
     const results = await server.api(`/api/v1/challenges/${first.json.id}/results`, {
       token: owner.token,
     });
+    // Best first, not first to arrive: Ken's 200 s beats the creator's 271 s.
     expect(results.json.map((r: { memberId: string }) => r.memberId)).toEqual([
-      owner.memberId,
       member.memberId,
+      owner.memberId,
     ]);
     const list = await server.api('/api/v1/challenges', { token: owner.token });
     expect(list.json).toHaveLength(1);

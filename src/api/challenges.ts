@@ -1,7 +1,7 @@
 /**
  * Challenges and results (club.md §5-3, §5-4, §6-3). A challenge is created
  * together with its creator's result — "I did this; you?" — and each member
- * submits once.
+ * submits once. A challenge's results are read best first (src/contracts/games.ts).
  */
 import { newId } from '../auth/tokens.js';
 import { API_VERSION } from '../limits.js';
@@ -48,6 +48,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
       }
       store.addResult({
         challengeId: existing.id,
+        gameId: existing.gameId,
         memberId: member.id,
         nickname: member.nickname,
         now,
@@ -75,6 +76,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     });
     store.addResult({
       challengeId: id,
+      gameId,
       memberId: member.id,
       nickname: member.nickname,
       now,
@@ -109,11 +111,14 @@ export function registerChallenges(router: Router, deps: Deps): void {
     '/api/v1/challenges/:id/results',
     { auth: 'member', limit: 'member' },
     (ctx) => {
-      const challenge = store.challengeById(ctx.params.id!, ctx.member!.id);
+      const member = ctx.member!;
+      const challenge = store.challengeById(ctx.params.id!, member.id);
       if (challenge === null) throw notFound('no such challenge');
+      // The best `resultsPage` by the game's axis, best first, and the caller's own row
+      // wherever it ranks (club.md §5-3) — not the first ones to arrive.
       return {
         status: 200,
-        body: store.results(challenge.id, limits.resultsPage).map(resultShape),
+        body: store.bestResults(challenge.id, member.id, limits.resultsPage).map(resultShape),
       };
     },
   );
@@ -147,6 +152,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
       const now = iso(ctx.now);
       const result = store.addResult({
         challengeId: challenge.id,
+        gameId: challenge.gameId,
         memberId: member.id,
         nickname: member.nickname,
         now,

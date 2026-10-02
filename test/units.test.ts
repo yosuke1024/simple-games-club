@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { bearerToken, hashToken, randomToken, safeEqual } from '../src/auth/tokens.js';
 import { loadConfig } from '../src/config.js';
+import { contractOf, resultRank } from '../src/contracts/games.js';
 import { RateLimiter } from '../src/http/rateLimit.js';
 import { Router } from '../src/http/router.js';
 
@@ -32,6 +33,50 @@ describe('tokens (club.md §5-1)', () => {
     expect(safeEqual('abc', 'abc')).toBe(true);
     expect(safeEqual('abc', 'abd')).toBe(false);
     expect(safeEqual('abc', 'ab')).toBe(false);
+  });
+});
+
+describe('resultRank (club.md §5-3)', () => {
+  it('sorts lower-is-better by the axis, higher-is-better by its negation, and never gives -0', () => {
+    expect(resultRank('sudoku', 'completed', { elapsedSeconds: 90 })).toEqual({
+      rankClass: 0,
+      rankKey: 90,
+    });
+    expect(resultRank('2048', 'completed', { score: 512 })).toEqual({
+      rankClass: 0,
+      rankKey: -512,
+    });
+    expect(Object.is(resultRank('2048', 'completed', { score: 0 }).rankKey, 0)).toBe(true);
+    expect(resultRank('hearts', 'completed', { score: 7 }).rankKey).toBe(7);
+  });
+
+  it('puts completed results without an axis after the ones with, and played ones last', () => {
+    for (const facts of [{}, { elapsedSeconds: '9' }, { elapsedSeconds: null }, null, 'x']) {
+      expect(resultRank('sudoku', 'completed', facts)).toEqual({ rankClass: 1, rankKey: null });
+    }
+    expect(resultRank('checkers', 'completed', { turns: 9 })).toEqual({
+      rankClass: 1,
+      rankKey: null,
+    });
+    expect(resultRank('sudoku', 'played', { elapsedSeconds: 9 })).toEqual({
+      rankClass: 2,
+      rankKey: null,
+    });
+  });
+
+  it('is not fooled by a number-like boolean, nor by an id that is an Object.prototype member', () => {
+    expect(resultRank('sudoku', 'completed', { elapsedSeconds: true })).toEqual({
+      rankClass: 1,
+      rankKey: null,
+    });
+    for (const gameId of ['constructor', 'toString', '__proto__']) {
+      expect(contractOf(gameId), gameId).toBeUndefined();
+      expect(resultRank(gameId, 'completed', { undefined: 5 }), gameId).toEqual({
+        rankClass: 1,
+        rankKey: null,
+      });
+    }
+    expect(contractOf('sudoku')).toEqual({ order: 'elapsedSeconds', direction: 'asc' });
   });
 });
 
