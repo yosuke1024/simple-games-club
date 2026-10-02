@@ -29,6 +29,7 @@ function bindingsFor(options: ServerOptions): Bindings {
     CLUB_HOSTING_PROVIDER: options.hosting.provider ?? '',
     CLUB_HOSTING_MANAGE_URL: options.hosting.manageUrl ?? '',
   };
+  if (options.objectName !== null) bindings.CLUB_OBJECT_NAME = options.objectName;
   if (options.openJoin) bindings.CLUB_OPEN_JOIN = '1';
   if (options.setupKey !== null) bindings.CLUB_SETUP_KEY = options.setupKey;
   if (options.publicOrigin !== null) bindings.CLUB_PUBLIC_ORIGIN = options.publicOrigin;

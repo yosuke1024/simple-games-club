@@ -103,6 +103,18 @@ of rows). Index entries count as rows written, which is why a claim writes 13.
 
 Measured 2026-10-01, workerd compatibility date 2026-09-01:
 
+### `GET /public` (the landing page's view)
+
+`GET /api/v1/public` (club.md §18) reads the `ranking_tables` summary joined to each
+leader's row (the number of tables, as `GET /rankings`), the day's `daily` challenges
+through the `challenges_daily` index, and, for each of them, a scan of its results to
+find the top three by the game's axis (`json_extract` in SQLite, three rows returned).
+That scan grows with the day's results, so it is not left to the traffic: the Worker
+answers from `caches.default` for five minutes (`Cache-Control: public, max-age=300`),
+and a cache hit never reaches the object. One cached copy per date (and per allowed
+origin), however many pages ask, is at most one object request each five minutes.
+Not measured separately from the table above.
+
 ### One club, request by request
 
 | Step                      | Request                               | Status | Rows read | Rows written | Response bytes |

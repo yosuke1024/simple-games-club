@@ -7,7 +7,13 @@
  * a script with no bindings (the schema); the other three take bindings.
  */
 import { GAME_CONTRACTS } from '../contracts/games.js';
-import { RANKING_INDEX_SQL, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import {
+  DAILY_INDEX_SQL,
+  RANKING_INDEX_SQL,
+  REPORTED_INDEX_SQL,
+  SCHEMA_SQL,
+  SCHEMA_VERSION,
+} from './schema.js';
 
 export type SqlValue = string | number | null;
 /** A row as the engine hands it back; the store narrows each column itself. */
@@ -27,6 +33,8 @@ export function migrate(db: SqlDriver): void {
   if (row === undefined) {
     db.run(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, String(SCHEMA_VERSION));
     db.exec(RANKING_INDEX_SQL);
+    db.exec(DAILY_INDEX_SQL);
+    db.exec(REPORTED_INDEX_SQL);
     return;
   }
   const stored = Number(row.value);
@@ -39,7 +47,10 @@ export function migrate(db: SqlDriver): void {
   }
   if (stored < 2) upgradeToV2(db);
   if (stored < 3) upgradeToV3(db);
+  if (stored < 4) upgradeToV4(db);
   db.exec(RANKING_INDEX_SQL);
+  db.exec(DAILY_INDEX_SQL);
+  db.exec(REPORTED_INDEX_SQL);
 }
 
 /**
@@ -92,6 +103,30 @@ export function upgradeToV3(db: SqlDriver): void {
     String(Number(top?.top ?? 0)),
   );
   rebuildRankingTables(db);
+  db.run(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`);
+}
+
+/**
+ * v3 → v4. SCHEMA_SQL has already created `reports` (IF NOT EXISTS), and the
+ * `challenges.daily` and `members_reported` indexes follow in migrate(). What
+ * an older table lacks (`members.report_count`) is added and backfilled from
+ * `reports`, so running it again changes nothing.
+ */
+export function upgradeToV4(db: SqlDriver): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS reports (
+    target_id TEXT NOT NULL,
+    reporter_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (target_id, reporter_id)
+  )`);
+  const have = new Set(db.all(`PRAGMA table_info(members)`).map((column) => String(column.name)));
+  if (!have.has('report_count')) {
+    db.exec(`ALTER TABLE members ADD COLUMN report_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  db.run(
+    `UPDATE members SET report_count =
+       (SELECT COUNT(*) FROM reports r WHERE r.target_id = members.id)`,
+  );
   db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
 }
 

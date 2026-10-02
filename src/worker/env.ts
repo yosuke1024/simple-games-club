@@ -13,6 +13,11 @@ export interface Env {
   CLUB: DurableObjectNamespace;
   /** The Simple Games web build, when wrangler.toml's `[assets]` has one to serve. */
   ASSETS?: Fetcher;
+  /**
+   * The Durable Object's name (`idFromName`); absent or blank, `club`. A new name is a
+   * fresh club — the previous object stays where it is, unreferenced (club.md §17-4).
+   */
+  CLUB_OBJECT_NAME?: string;
   CLUB_SETUP_KEY?: string;
   CLUB_SECRET?: string;
   CLUB_PUBLIC_ORIGIN?: string;

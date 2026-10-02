@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { migrate, upgradeToV3, type SqlDriver } from '../src/db/driver.js';
+import { migrate, upgradeToV3, upgradeToV4, type SqlDriver } from '../src/db/driver.js';
 
 // The schema as v1 shipped it, copied here: the upgrade must work on exactly this.
 const V1_SCHEMA = `
@@ -78,7 +78,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('3');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
     expect(d.get(`SELECT result_count, daily FROM challenges WHERE id = 'ch1'`)).toEqual({
       result_count: 2,
       daily: null,
@@ -112,7 +112,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('3');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'records'`)).toBeUndefined();
     expect(d.all(`SELECT * FROM ranking_entries`)).toEqual([]);
     expect(
@@ -173,6 +173,55 @@ describe('migrate() from schema 1', () => {
       { game_id: 'hearts', entry_count: 1, leader_member_id: 'a' },
       { game_id: 'sudoku', entry_count: 3, leader_member_id: 'b' },
     ]);
+  });
+
+  it('upgradeToV4 adds reports and the daily index, and runs again to the same result', () => {
+    dir = mkdtempSync(join(tmpdir(), 'sg-club-migrate-'));
+    db = new DatabaseSync(join(dir, 'club.sqlite'));
+    const d: SqlDriver = {
+      exec: (script) => db.exec(script),
+      run: (sql, ...params) => {
+        db.prepare(sql).run(...params);
+      },
+      get: (sql, ...params) => db.prepare(sql).get(...params),
+      all: (sql, ...params) => db.prepare(sql).all(...params),
+    };
+    migrate(d); // a current database…
+    d.exec(`DROP TABLE reports`);
+    d.exec(`DROP INDEX members_reported`);
+    d.exec(`ALTER TABLE members DROP COLUMN report_count`);
+    d.exec(`DROP INDEX challenges_daily`);
+    d.run(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`); // …made to look like v3
+    for (const id of ['a', 'b', 'c']) {
+      d.run(
+        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+        id,
+        id,
+        `h${id}`,
+      );
+    }
+    migrate(d);
+    expect(d.all(`SELECT * FROM reports`)).toEqual([]);
+    expect(d.all(`SELECT id, report_count FROM members ORDER BY id`)).toEqual([
+      { id: 'a', report_count: 0 },
+      { id: 'b', report_count: 0 },
+      { id: 'c', report_count: 0 },
+    ]);
+    // Backfill: reports that exist when the upgrade runs are counted per target.
+    d.run(`INSERT INTO reports VALUES ('a', 'b', 't'), ('a', 'c', 't'), ('b', 'c', 't')`);
+    d.run(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`);
+    d.exec(`UPDATE members SET report_count = 0`);
+    migrate(d);
+    migrate(d);
+    upgradeToV4(d);
+    expect(d.all(`SELECT id, report_count FROM members ORDER BY id`)).toEqual([
+      { id: 'a', report_count: 2 },
+      { id: 'b', report_count: 1 },
+      { id: 'c', report_count: 0 },
+    ]);
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
+    expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'members_reported'`)).toBeDefined();
+    expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'challenges_daily'`)).toBeDefined();
   });
 
   it('refuses a database newer than this server', () => {
