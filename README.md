@@ -124,6 +124,7 @@ meaning on Workers (there is no port, no directory, no proxy in front).
 | `CLUB_HOSTING_PROVIDER`   | `railway` if there    | A label for the owner's Hosting screen (`cloudflare` in `wrangler.toml`)                                                  |
 | `CLUB_HOSTING_MANAGE_URL` | derived on Railway    | The provider dashboard, shown to owners only                                                                              |
 | `CLUB_TRUST_PROXY`        | `1` Node, `0` Workers | Read `X-Forwarded-*` instead of the connection (Node: every PaaS sets them; Workers: Cloudflare already names the client) |
+| `CLUB_OPEN_JOIN`          | —                     | `1` lets `POST /join` take a nickname alone (the Public deployment); unset, an invite token is required (a Private one)   |
 | `CLUB_LIMITS`             | —                     | _Workers._ A JSON object overriding entries of `src/limits.ts` for one deployment                                         |
 | `CLUB_LOG`                | `1`                   | _Node._ `0` silences the one-line request log                                                                             |
 
@@ -149,13 +150,13 @@ too deep.
 under `test/` send its example JSON verbatim. In one screen:
 
 ```text
-GET    /api/v1/health                        no auth       { ok, api: 1, claimed }
+GET    /api/v1/health                        no auth       { ok, api: 1, claimed, open }
 POST   /api/v1/claim                         setup key     { setupKey, nickname, clubName? } → { club, member, memberToken }
-POST   /api/v1/join                          invite token  { inviteToken, nickname }         → { club, member, memberToken }
+POST   /api/v1/join                          invite token  { nickname, inviteToken? }       → { club, member, memberToken }
 GET    /api/v1/club                          member        { club, me, members[] }
 PATCH  /api/v1/club                          owner         { name }
-GET    /api/v1/challenges[?after=<id>]       member        Challenge[]  (newest first, 50)
-POST   /api/v1/challenges                    member        challenge + the creator's result → Challenge
+GET    /api/v1/challenges[?after=<id>][&daily=YYYY-MM-DD]  member  Challenge[]  (newest first, 50)
+POST   /api/v1/challenges                    member        challenge + the creator's result, daily? → Challenge (201; 200 with the existing one when a live challenge has the same gameId + seed + boardDigest)
 GET    /api/v1/challenges/:id                member        Challenge
 DELETE /api/v1/challenges/:id                creator/owner 204
 GET    /api/v1/challenges/:id/results        member        Result[]  (submission order, 200)
@@ -174,6 +175,8 @@ Every response carries `X-Club-Api: 1`. Errors are
 
 Points the implementation settles within the contract:
 
+- `inviteToken` is optional on `POST /join` only when `CLUB_OPEN_JOIN=1`; an
+  invite or owner link still works there as before.
 - List endpoints return JSON arrays.
 - The member invite token is stored as issued, so the owner can read it back;
   every other token — member tokens, owner links, the setup key — is stored as

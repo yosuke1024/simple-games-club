@@ -36,9 +36,17 @@ tag = "v1"
 new_sqlite_classes = ["ClubObject"]
 
 [vars]
+# This file is the Public deployment's configuration: anyone may join without an invite.
+CLUB_OPEN_JOIN = "1"
+# Anyone may join, so the member cap is the abuse ceiling, not a club size
+# (simple-games docs/architecture/club.md §14-26). The other limits stay at src/limits.ts.
+CLUB_LIMITS = '{"maxMembers": 10000}'
 CLUB_HOSTING_PROVIDER = "cloudflare"
 # Invite links name this origin whichever hostname the request arrived on.
 CLUB_PUBLIC_ORIGIN = "https://club.pixapps.ai"
+# The Web version at pixapps.ai joins the Public Club House from its own origin
+# (simple-games docs/architecture/club.md §15-1); the app's two origins are always allowed.
+CLUB_CORS_ORIGINS = "https://pixapps.ai"
 
 # Workers Logs: the request count is visible in the dashboard either way; this
 # keeps the object's console.error (a 500) readable. Free plan: 200,000 events

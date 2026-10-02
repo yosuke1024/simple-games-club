@@ -22,6 +22,11 @@ export interface ApiConfig {
   /** Extra CORS origins on top of the fixed three (club.md §5-1). */
   corsOrigins: readonly string[];
   hosting: HostingConfig;
+  /**
+   * `CLUB_OPEN_JOIN=1`: `POST /join` takes a nickname alone — the Public
+   * deployment, where anyone may join. Off, an invite token is required.
+   */
+  openJoin: boolean;
 }
 
 /** What every handler is handed. The request's clock travels on `Ctx.now`. */

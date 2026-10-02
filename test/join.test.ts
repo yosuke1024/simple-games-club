@@ -106,3 +106,67 @@ describe('POST /api/v1/join (club.md §5-4, §7)', () => {
     expect(reply.status).toBe(400);
   });
 });
+
+describe('POST /api/v1/join on an open server', () => {
+  it('rejects a missing invite token when the server is closed', async () => {
+    await claimOwner(server);
+    const reply = await server.api('/api/v1/join', { body: { nickname: 'Ken' } });
+    expect(reply.status).toBe(400);
+    expect(reply.json.error).toEqual({
+      code: 'invalid_request',
+      message: 'inviteToken is required',
+    });
+  });
+
+  it('takes a nickname alone and answers in the shape of §5-4 as a member', async () => {
+    await server.reopen({ openJoin: true });
+    const early = await server.api('/api/v1/join', { body: { nickname: 'Ken' } });
+    expect(early.status).toBe(404);
+    const owner = await claimOwner(server);
+    const reply = await server.api('/api/v1/join', { body: { nickname: 'Ken' } });
+    expect(reply.status).toBe(201);
+    expect(reply.json).toEqual({
+      club: { id: owner.clubId, name: "Yoh's Club", createdAt: expect.any(String) },
+      member: {
+        id: expect.stringMatching(/^m_/),
+        nickname: 'Ken',
+        role: 'member',
+        joinedAt: expect.any(String),
+      },
+      memberToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    const club = await server.api('/api/v1/club', { token: reply.json.memberToken });
+    expect(club.json.me.role).toBe('member');
+  });
+
+  it('still honours a member invite and an owner link', async () => {
+    await server.reopen({ openJoin: true });
+    const owner = await claimOwner(server);
+    const invite = await server.api('/api/v1/invite', { token: owner.token });
+    const viaInvite = await server.api('/api/v1/join', {
+      body: { inviteToken: invite.json.token, nickname: 'Ken' },
+    });
+    expect(viaInvite.status).toBe(201);
+    expect(viaInvite.json.member.role).toBe('member');
+    const link = await server.api('/api/v1/invite', {
+      token: owner.token,
+      body: { role: 'owner' },
+    });
+    const viaLink = await server.api('/api/v1/join', {
+      body: { inviteToken: link.json.token, nickname: 'Mia' },
+    });
+    expect(viaLink.status).toBe(201);
+    expect(viaLink.json.member.role).toBe('owner');
+    const bad = await server.api('/api/v1/join', { body: { inviteToken: 'nope', nickname: 'X' } });
+    expect(bad.status).toBe(409);
+  });
+
+  it('applies the member cap to open joins', async () => {
+    await server.reopen({ openJoin: true, limits: { maxMembers: 2 } });
+    await claimOwner(server);
+    expect((await server.api('/api/v1/join', { body: { nickname: 'Ken' } })).status).toBe(201);
+    const full = await server.api('/api/v1/join', { body: { nickname: 'Mia' } });
+    expect(full.status).toBe(409);
+    expect(full.json.error.code).toBe('too_many_members');
+  });
+});

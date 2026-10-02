@@ -50,6 +50,7 @@ export interface ServerOptions {
   publicOrigin: string | null;
   corsOrigins: string[];
   hosting: HostingConfig;
+  openJoin: boolean;
 }
 
 export const DEFAULTS: ServerOptions = {
@@ -59,6 +60,7 @@ export const DEFAULTS: ServerOptions = {
   publicOrigin: null,
   corsOrigins: [],
   hosting: { provider: null, manageUrl: null },
+  openJoin: false,
 };
 
 export const newClock = (): Clock => ({

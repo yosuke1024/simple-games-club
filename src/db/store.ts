@@ -1,6 +1,7 @@
 /**
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
+import { GAME_CONTRACTS, axisValue } from '../contracts/games.js';
 import type { Row, SqlDriver } from './driver.js';
 
 export type Role = 'owner' | 'member';
@@ -42,6 +43,8 @@ export interface ChallengeRow {
   seed: string;
   boardDigest: string;
   title: string | null;
+  /** `YYYY-MM-DD` when the board is a day's challenge, else null. */
+  daily: string | null;
   createdBy: { id: string; nickname: string };
   createdAt: string;
   resultCount: number;
@@ -57,16 +60,26 @@ export interface ResultRow {
   facts: unknown;
 }
 
-/** One completed result with what the records derivation needs (club.md §5-4). */
-export interface RecordCandidate {
+/** A club record as stored: the best completed result of one game and mode (club.md §5-4). */
+export interface RecordRow {
   gameId: string;
-  params: unknown;
-  challengeId: string;
+  paramsKey: string;
+  facts: unknown;
   memberId: string;
   nickname: string;
-  submittedAt: string;
-  facts: unknown;
+  challengeId: string;
 }
+
+/** Strictly lower wins; an equal value keeps the earlier row (candidates arrive oldest first). */
+const UPSERT_RECORD = `
+  INSERT INTO records
+    (game_id, params_key, value, challenge_id, member_id, nickname, facts_json, submitted_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (game_id, params_key) DO UPDATE SET
+    value = excluded.value, challenge_id = excluded.challenge_id,
+    member_id = excluded.member_id, nickname = excluded.nickname,
+    facts_json = excluded.facts_json, submitted_at = excluded.submitted_at
+  WHERE excluded.value < records.value`;
 
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
@@ -117,6 +130,7 @@ const toChallenge = (row: Row): ChallengeRow => ({
   seed: text(row, 'seed'),
   boardDigest: text(row, 'board_digest'),
   title: nullableText(row, 'title'),
+  daily: nullableText(row, 'daily'),
   createdBy: { id: text(row, 'created_by'), nickname: text(row, 'creator_nickname') },
   createdAt: text(row, 'created_at'),
   resultCount: int(row, 'result_count'),
@@ -134,7 +148,6 @@ const toResult = (row: Row): ResultRow => ({
 
 const CHALLENGE_SELECT = `
   SELECT c.*, m.nickname AS creator_nickname,
-    (SELECT COUNT(*) FROM results r WHERE r.challenge_id = c.id) AS result_count,
     EXISTS (SELECT 1 FROM results r WHERE r.challenge_id = c.id AND r.member_id = ?) AS mine
   FROM challenges c
   JOIN members m ON m.id = c.created_by
@@ -312,13 +325,14 @@ export class Store {
     seed: string;
     boardDigest: string;
     title: string | null;
+    daily: string | null;
     createdBy: string;
     now: string;
   }): void {
     this.db.run(
       `INSERT INTO challenges
-           (id, game_id, contract_version, params_json, seed, board_digest, title, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, game_id, contract_version, params_json, seed, board_digest, title, daily, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.id,
       input.gameId,
       input.contractVersion,
@@ -326,6 +340,7 @@ export class Store {
       input.seed,
       input.boardDigest,
       input.title,
+      input.daily,
       input.createdBy,
       input.now,
     );
@@ -336,24 +351,55 @@ export class Store {
     return row === undefined ? null : toChallenge(row);
   }
 
-  /** Newest first; `afterId` continues past that challenge (club.md §5-3). */
-  listChallenges(viewerId: string, afterId: string | null, limit: number): ChallengeRow[] {
-    const rows =
-      afterId === null
-        ? this.db.all(`${CHALLENGE_SELECT} ORDER BY c.seq DESC LIMIT ?`, viewerId, limit)
-        : this.db.all(
-            `${CHALLENGE_SELECT}
-                 AND c.seq < (SELECT seq FROM challenges WHERE id = ?)
-               ORDER BY c.seq DESC LIMIT ?`,
-            viewerId,
-            afterId,
-            limit,
-          );
-    return rows.map(toChallenge);
+  /** The oldest live challenge on this exact board — "one challenge per board" (club.md §6-3). */
+  liveChallengeOnBoard(
+    gameId: string,
+    seed: string,
+    boardDigest: string,
+    viewerId: string,
+  ): ChallengeRow | null {
+    const row = this.db.get(
+      `${CHALLENGE_SELECT} AND c.game_id = ? AND c.seed = ? AND c.board_digest = ?
+       ORDER BY c.seq LIMIT 1`,
+      viewerId,
+      gameId,
+      seed,
+      boardDigest,
+    );
+    return row === undefined ? null : toChallenge(row);
   }
 
+  /**
+   * Newest first; `afterId` continues past that challenge (club.md §5-3);
+   * `daily` keeps only the challenges tagged with that day.
+   */
+  listChallenges(
+    viewerId: string,
+    afterId: string | null,
+    limit: number,
+    daily: string | null = null,
+  ): ChallengeRow[] {
+    const bindings: (string | number)[] = [viewerId];
+    let where = '';
+    if (daily !== null) {
+      where += ' AND c.daily = ?';
+      bindings.push(daily);
+    }
+    if (afterId !== null) {
+      where += ' AND c.seq < (SELECT seq FROM challenges WHERE id = ?)';
+      bindings.push(afterId);
+    }
+    bindings.push(limit);
+    return this.db
+      .all(`${CHALLENGE_SELECT}${where} ORDER BY c.seq DESC LIMIT ?`, ...bindings)
+      .map(toChallenge);
+  }
+
+  /** Soft delete; the game's records are rebuilt from the challenges that remain live. */
   deleteChallenge(id: string, now: string): void {
+    const row = this.db.get(`SELECT game_id FROM challenges WHERE id = ?`, id);
     this.db.run(`UPDATE challenges SET deleted_at = ? WHERE id = ?`, now, id);
+    if (row !== undefined) this.rebuildRecords(text(row, 'game_id'));
   }
 
   // ---------- results ----------
@@ -393,6 +439,27 @@ export class Store {
       input.outcome,
       JSON.stringify(input.facts),
     );
+    this.db.run(
+      `UPDATE challenges SET result_count = result_count + 1 WHERE id = ?`,
+      input.challengeId,
+    );
+    if (input.outcome === 'completed') {
+      const challenge = this.db.get(
+        `SELECT game_id, params_json FROM challenges WHERE id = ?`,
+        input.challengeId,
+      );
+      if (challenge !== undefined) {
+        this.offerRecord({
+          gameId: text(challenge, 'game_id'),
+          params: parseJson(text(challenge, 'params_json')),
+          challengeId: input.challengeId,
+          memberId: input.memberId,
+          nickname: input.nickname,
+          submittedAt: input.now,
+          facts: input.facts,
+        });
+      }
+    }
     return {
       challengeId: input.challengeId,
       memberId: input.memberId,
@@ -403,18 +470,37 @@ export class Store {
     };
   }
 
-  /** Every completed result on a live challenge, oldest first — the records input. */
-  completedResultsForRecords(): RecordCandidate[] {
-    return this.db
-      .all(
-        `SELECT r.challenge_id, r.member_id, r.nickname, r.submitted_at, r.facts_json,
-                c.game_id, c.params_json
-         FROM results r
-         JOIN challenges c ON c.id = r.challenge_id
-         WHERE r.outcome = 'completed' AND c.deleted_at IS NULL
-         ORDER BY r.seq`,
-      )
-      .map((row) => ({
+  // ---------- records ----------
+
+  /** Ordered by game, then mode — the response order of `GET /records`. */
+  records(): RecordRow[] {
+    return this.db.all(`SELECT * FROM records ORDER BY game_id, params_key`).map((row) => ({
+      gameId: text(row, 'game_id'),
+      paramsKey: text(row, 'params_key'),
+      facts: parseJson(text(row, 'facts_json')),
+      memberId: text(row, 'member_id'),
+      nickname: text(row, 'nickname'),
+      challengeId: text(row, 'challenge_id'),
+    }));
+  }
+
+  /**
+   * Derives the records of one game (or all, with null) from the completed
+   * results of live challenges, oldest first, so ties keep the earlier result.
+   * The same derivation the table is kept by incrementally in `addResult`.
+   */
+  rebuildRecords(gameId: string | null): void {
+    if (gameId === null) this.db.run(`DELETE FROM records`);
+    else this.db.run(`DELETE FROM records WHERE game_id = ?`, gameId);
+    const rows =
+      gameId === null
+        ? this.db.all(COMPLETED_FOR_RECORDS)
+        : this.db.all(
+            COMPLETED_FOR_RECORDS.replace('ORDER BY', 'AND c.game_id = ? ORDER BY'),
+            gameId,
+          );
+    for (const row of rows) {
+      this.offerRecord({
         gameId: text(row, 'game_id'),
         params: parseJson(text(row, 'params_json')),
         challengeId: text(row, 'challenge_id'),
@@ -422,6 +508,43 @@ export class Store {
         nickname: text(row, 'nickname'),
         submittedAt: text(row, 'submitted_at'),
         facts: parseJson(text(row, 'facts_json')),
-      }));
+      });
+    }
+  }
+
+  /** A game the server does not know, or facts without the axis, never make a record. */
+  private offerRecord(c: {
+    gameId: string;
+    params: unknown;
+    challengeId: string;
+    memberId: string;
+    nickname: string;
+    submittedAt: string;
+    facts: unknown;
+  }): void {
+    const contract = GAME_CONTRACTS[c.gameId];
+    if (contract === undefined) return;
+    const paramsKey = contract.paramsKey(c.params);
+    const value = axisValue(contract, c.facts);
+    if (paramsKey === null || value === null) return;
+    this.db.run(
+      UPSERT_RECORD,
+      c.gameId,
+      paramsKey,
+      value,
+      c.challengeId,
+      c.memberId,
+      c.nickname,
+      JSON.stringify(c.facts),
+      c.submittedAt,
+    );
   }
 }
+
+const COMPLETED_FOR_RECORDS = `
+  SELECT r.challenge_id, r.member_id, r.nickname, r.submitted_at, r.facts_json,
+         c.game_id, c.params_json
+  FROM results r
+  JOIN challenges c ON c.id = r.challenge_id
+  WHERE r.outcome = 'completed' AND c.deleted_at IS NULL
+  ORDER BY r.seq`;

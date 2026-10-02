@@ -120,3 +120,53 @@ describe('GET /api/v1/records (club.md §5-4, §6-1)', () => {
     ]);
   });
 });
+
+describe('records kept in step with challenges (club.md §5-4)', () => {
+  const records = async () =>
+    (await server.api('/api/v1/records', { token: yoh.token })).json as {
+      gameId: string;
+      paramsKey: string;
+      nickname: string;
+      challengeId: string;
+    }[];
+
+  it('moves to the next-best result when the record challenge is deleted, then disappears', async () => {
+    const best = (await challenge(yoh, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 100 }))
+      .json.id;
+    const next = (await challenge(ken, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 200 }))
+      .json.id;
+    expect((await records())[0]).toMatchObject({ nickname: 'Yoh', challengeId: best });
+    await server.api(`/api/v1/challenges/${best}`, { method: 'DELETE', token: yoh.token });
+    expect((await records())[0]).toMatchObject({ nickname: 'Ken', challengeId: next });
+    await server.api(`/api/v1/challenges/${next}`, { method: 'DELETE', token: yoh.token });
+    expect(await records()).toEqual([]);
+  });
+
+  it('is updated by a result landing on a deduped challenge', async () => {
+    const body = (facts: Record<string, unknown>) => ({
+      gameId: 'sudoku',
+      contractVersion: 1,
+      params: { difficulty: 'easy' },
+      seed: 'same-board',
+      boardDigest: 'xx1:00000000',
+      result: { outcome: 'completed', facts },
+    });
+    const first = await server.api('/api/v1/challenges', {
+      token: yoh.token,
+      body: body({ elapsedSeconds: 300 }),
+    });
+    const second = await server.api('/api/v1/challenges', {
+      token: ken.token,
+      body: body({ elapsedSeconds: 150 }),
+    });
+    expect(second.status).toBe(200);
+    expect(await records()).toEqual([
+      expect.objectContaining({ nickname: 'Ken', challengeId: first.json.id }),
+    ]);
+  });
+
+  it('never makes a record of a played result', async () => {
+    await challenge(yoh, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 10 }, 'played');
+    expect(await records()).toEqual([]);
+  });
+});

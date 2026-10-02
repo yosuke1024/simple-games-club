@@ -37,6 +37,26 @@ export const title = (value: unknown): string | null => {
   return stringField(value, 'title', 0, 60);
 };
 
+/** `daily`: absent or null means none; otherwise a real calendar date, `YYYY-MM-DD`. */
+export const daily = (value: unknown): string | null => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw invalidRequest('daily must be a date, YYYY-MM-DD');
+  }
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    throw invalidRequest('daily must be a real calendar date');
+  }
+  return value;
+};
+
+/** The `?daily=` filter: unlike the body field, it must be present when the parameter is. */
+export const dailyQuery = (value: string | null): string => {
+  const parsed = daily(value);
+  if (parsed === null) throw invalidRequest('daily must be a date, YYYY-MM-DD');
+  return parsed;
+};
+
 export const role = (value: unknown): Role => {
   if (value === undefined) return 'member';
   if (value === 'member' || value === 'owner') return value;
