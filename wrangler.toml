@@ -11,10 +11,11 @@ main = "src/worker/index.ts"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
-# The deployment's address. A custom domain on a zone this account holds:
-# wrangler creates the DNS record and certificate on deploy. workers.dev stays
-# on as well until the domain is confirmed working; then `workers_dev = false`.
+# The deployment's one address: a custom domain on a zone this account holds.
+# wrangler creates the DNS record and the certificate on deploy. The
+# workers.dev address is off — one origin for invite links and CORS.
 routes = [{ pattern = "club.pixapps.ai", custom_domain = true }]
+workers_dev = false
 
 # Hashed assets are served here, free and before the Worker runs; only the
 # API and the entry pages reach the Worker (and so count as requests).
