@@ -6,8 +6,8 @@
  * deployments differ only in how a request reaches the database. `exec` runs
  * a script with no bindings (the schema); the other three take bindings.
  */
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
-import { Store } from './store.js';
+import { GAME_CONTRACTS } from '../contracts/games.js';
+import { RANKING_INDEX_SQL, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 
 export type SqlValue = string | number | null;
 /** A row as the engine hands it back; the store narrows each column itself. */
@@ -26,6 +26,7 @@ export function migrate(db: SqlDriver): void {
   const row = db.get(`SELECT value FROM meta WHERE key = 'schema_version'`);
   if (row === undefined) {
     db.run(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, String(SCHEMA_VERSION));
+    db.exec(RANKING_INDEX_SQL);
     return;
   }
   const stored = Number(row.value);
@@ -37,11 +38,13 @@ export function migrate(db: SqlDriver): void {
     );
   }
   if (stored < 2) upgradeToV2(db);
+  if (stored < 3) upgradeToV3(db);
+  db.exec(RANKING_INDEX_SQL);
 }
 
 /**
- * v1 → v2. SCHEMA_SQL above has already created `records` and the board index
- * (both IF NOT EXISTS); what an old `challenges` table lacks is added here,
+ * v1 → v2. SCHEMA_SQL above has already created the board index
+ * (IF NOT EXISTS); what an old `challenges` table lacks is added here,
  * checked first so a run that stopped half-way can simply run again.
  */
 function upgradeToV2(db: SqlDriver): void {
@@ -56,6 +59,86 @@ function upgradeToV2(db: SqlDriver): void {
     `UPDATE challenges SET result_count =
        (SELECT COUNT(*) FROM results r WHERE r.challenge_id = challenges.id)`,
   );
-  new Store(db).rebuildRecords(null);
+  db.run(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`);
+}
+
+/**
+ * v2 → v3. SCHEMA_SQL has already created `ranking_entries` and
+ * `ranking_tables` (IF NOT EXISTS). The v2 `records` table is dropped, not
+ * carried over: it was derived from challenge results, which rankings no
+ * longer follow (club.md §16), so there is nothing in it a ranking could
+ * honestly inherit.
+ *
+ * A `ranking_entries` made before `seq` existed (a developer database only —
+ * v3 was never deployed) gets the column, a backfill in insertion order, the
+ * counter, and its index rebuilt; the summary table is rebuilt from the rows.
+ * Every step can run again.
+ */
+export function upgradeToV3(db: SqlDriver): void {
+  db.exec(`DROP TABLE IF EXISTS records`);
+  const have = new Set(
+    db.all(`PRAGMA table_info(ranking_entries)`).map((column) => String(column.name)),
+  );
+  if (!have.has('seq')) {
+    db.exec(`ALTER TABLE ranking_entries ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`DROP INDEX IF EXISTS ranking_entries_table`);
+    db.exec(`UPDATE ranking_entries SET seq = rowid`);
+  }
+  db.exec(RANKING_INDEX_SQL);
+  const top = db.get(`SELECT COALESCE(MAX(seq), 0) AS top FROM ranking_entries`);
+  db.run(
+    `INSERT INTO meta (key, value) VALUES ('ranking_seq', ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    String(Number(top?.top ?? 0)),
+  );
+  rebuildRankingTables(db);
   db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
+}
+
+/** One pass over the entries, grouped in code: count and leader per table. */
+function rebuildRankingTables(db: SqlDriver): void {
+  db.run(`DELETE FROM ranking_tables`);
+  const tables = new Map<
+    string,
+    { gameId: string; paramsKey: string; count: number; leader: string; value: number; seq: number }
+  >();
+  const rows = db.all(
+    `SELECT game_id, params_key, member_id, value, seq FROM ranking_entries ORDER BY seq`,
+  );
+  for (const row of rows) {
+    const gameId = String(row.game_id);
+    const paramsKey = String(row.params_key);
+    const value = Number(row.value);
+    const key = `${gameId}\u0000${paramsKey}`;
+    const table = tables.get(key);
+    if (table === undefined) {
+      tables.set(key, {
+        gameId,
+        paramsKey,
+        count: 1,
+        leader: String(row.member_id),
+        value,
+        seq: Number(row.seq),
+      });
+      continue;
+    }
+    table.count += 1;
+    const asc = (GAME_CONTRACTS[gameId]?.direction ?? 'asc') === 'asc';
+    // Rows arrive in seq order, so only a strictly better value takes the lead.
+    if (asc ? value < table.value : value > table.value) {
+      table.leader = String(row.member_id);
+      table.value = value;
+      table.seq = Number(row.seq);
+    }
+  }
+  for (const t of tables.values()) {
+    db.run(
+      `INSERT INTO ranking_tables (game_id, params_key, entry_count, leader_member_id)
+       VALUES (?, ?, ?, ?)`,
+      t.gameId,
+      t.paramsKey,
+      t.count,
+      t.leader,
+    );
+  }
 }

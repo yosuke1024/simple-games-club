@@ -3,7 +3,7 @@
  * be renamed without the API noticing, and so the API can never leak a
  * column the contract does not name (a token hash, a revoked_at).
  */
-import type { ChallengeRow, ClubRow, MemberRow, ResultRow } from '../db/store.js';
+import type { ChallengeRow, ClubRow, MemberRow, RankingEntryRow, ResultRow } from '../db/store.js';
 
 export const clubShape = (club: ClubRow) => ({
   id: club.id,
@@ -39,4 +39,13 @@ export const resultShape = (result: ResultRow) => ({
   submittedAt: result.submittedAt,
   outcome: result.outcome,
   facts: result.facts,
+});
+
+export const rankingEntryShape = (entry: RankingEntryRow) => ({
+  memberId: entry.memberId,
+  nickname: entry.nickname,
+  submittedAt: entry.submittedAt,
+  facts: entry.facts,
+  seed: entry.seed,
+  boardDigest: entry.boardDigest,
 });

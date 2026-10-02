@@ -11,46 +11,47 @@ beforeEach(async () => {
 });
 afterEach(() => server.close());
 
-const challenge = (
+const rank = (
   session: Session,
   gameId: string,
-  params: Record<string, unknown>,
+  paramsKey: string,
   facts: Record<string, unknown>,
   outcome = 'completed',
 ) =>
+  server.api('/api/v1/rankings/results', {
+    token: session.token,
+    body: {
+      gameId,
+      contractVersion: 1,
+      paramsKey,
+      params: {},
+      seed: 's',
+      boardDigest: null,
+      outcome,
+      facts,
+    },
+  });
+
+const challenge = (session: Session, gameId: string, facts: Record<string, unknown>) =>
   server.api('/api/v1/challenges', {
     token: session.token,
     body: {
       gameId,
       contractVersion: 1,
-      params,
-      seed: `${gameId}-${Math.random().toString(36).slice(2)}`,
+      params: { difficulty: 'hard' },
+      seed: 'c-seed',
       boardDigest: 'xx1:00000000',
-      result: { outcome, facts },
+      result: { outcome: 'completed', facts },
     },
   });
 
-const submit = (
-  session: Session,
-  id: string,
-  facts: Record<string, unknown>,
-  outcome = 'completed',
-) =>
-  server.api(`/api/v1/challenges/${id}/results`, {
-    token: session.token,
-    body: { contractVersion: 1, boardDigest: 'xx1:00000000', outcome, facts },
-  });
-
-describe('GET /api/v1/records (club.md §5-4, §6-1)', () => {
-  it("keeps one record per game and mode: the lowest value on that game's axis", async () => {
-    const hard = (await challenge(yoh, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 305 }))
-      .json.id;
-    await submit(ken, hard, { elapsedSeconds: 271, mistakes: 0, hints: 1 });
-    await challenge(yoh, 'sudoku', { difficulty: 'easy' }, { elapsedSeconds: 90 });
-    const water = (
-      await challenge(ken, 'water-sort', { tier: 'medium' }, { moves: 40, elapsedSeconds: 10 })
-    ).json.id;
-    await submit(yoh, water, { moves: 38, elapsedSeconds: 200 });
+describe('GET /api/v1/records — the rankings leaders in the old shape (club.md §16-1)', () => {
+  it('returns one row per table: its leader, with an empty challengeId', async () => {
+    await rank(yoh, 'sudoku', 'hard', { elapsedSeconds: 305 });
+    await rank(ken, 'sudoku', 'hard', { elapsedSeconds: 271, mistakes: 0 });
+    await rank(yoh, 'sudoku', 'easy', { elapsedSeconds: 90 });
+    await rank(ken, 'water-sort', 'medium', { moves: 40 });
+    await rank(yoh, 'water-sort', 'medium', { moves: 38 });
 
     const reply = await server.api('/api/v1/records', { token: ken.token });
     expect(reply.status).toBe(200);
@@ -61,112 +62,53 @@ describe('GET /api/v1/records (club.md §5-4, §6-1)', () => {
         facts: { elapsedSeconds: 90 },
         memberId: yoh.memberId,
         nickname: 'Yoh',
-        challengeId: expect.any(String),
+        challengeId: '',
       },
       {
         gameId: 'sudoku',
         paramsKey: 'hard',
-        facts: { elapsedSeconds: 271, mistakes: 0, hints: 1 },
+        facts: { elapsedSeconds: 271, mistakes: 0 },
         memberId: ken.memberId,
         nickname: 'Ken',
-        challengeId: hard,
+        challengeId: '',
       },
       {
         gameId: 'water-sort',
         paramsKey: 'medium',
-        facts: { moves: 38, elapsedSeconds: 200 },
+        facts: { moves: 38 },
         memberId: yoh.memberId,
         nickname: 'Yoh',
-        challengeId: water,
+        challengeId: '',
       },
     ]);
   });
 
-  it('gives a tie to the earlier result, and ignores played results, unknown games and deleted challenges', async () => {
-    const first = (
-      await challenge(
-        yoh,
-        'minesweeper',
-        { difficulty: 'medium', firstIndex: 3 },
-        { elapsedSeconds: 60 },
-      )
-    ).json.id;
-    await submit(ken, first, { elapsedSeconds: 60, hints: 0 });
-    const lost = (
-      await challenge(ken, 'minesweeper', { difficulty: 'medium', firstIndex: 3 }, {}, 'played')
-    ).json.id;
-    await submit(yoh, lost, { elapsedSeconds: 1 }, 'played');
-    await challenge(ken, 'chess', { level: 1 }, { elapsedSeconds: 1 });
-    const gone = (
-      await challenge(
-        ken,
-        'minesweeper',
-        { difficulty: 'easy', firstIndex: 0 },
-        { elapsedSeconds: 5 },
-      )
-    ).json.id;
-    await server.api(`/api/v1/challenges/${gone}`, { method: 'DELETE', token: ken.token });
+  it('gives a tie to the earlier result and follows direction (higher score leads in 2048)', async () => {
+    await rank(yoh, 'minesweeper', 'medium', { elapsedSeconds: 60 });
+    server.clock.advance(1000);
+    await rank(ken, 'minesweeper', 'medium', { elapsedSeconds: 60 });
+    await rank(ken, '2048', 'classic', { score: 900 });
+    await rank(yoh, '2048', 'classic', { score: 1200 });
 
     const reply = await server.api('/api/v1/records', { token: yoh.token });
-    expect(reply.json).toEqual([
-      {
-        gameId: 'minesweeper',
-        paramsKey: 'medium',
-        facts: { elapsedSeconds: 60 },
-        memberId: yoh.memberId,
-        nickname: 'Yoh',
-        challengeId: first,
-      },
-    ]);
-  });
-});
-
-describe('records kept in step with challenges (club.md §5-4)', () => {
-  const records = async () =>
-    (await server.api('/api/v1/records', { token: yoh.token })).json as {
-      gameId: string;
-      paramsKey: string;
-      nickname: string;
-      challengeId: string;
-    }[];
-
-  it('moves to the next-best result when the record challenge is deleted, then disappears', async () => {
-    const best = (await challenge(yoh, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 100 }))
-      .json.id;
-    const next = (await challenge(ken, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 200 }))
-      .json.id;
-    expect((await records())[0]).toMatchObject({ nickname: 'Yoh', challengeId: best });
-    await server.api(`/api/v1/challenges/${best}`, { method: 'DELETE', token: yoh.token });
-    expect((await records())[0]).toMatchObject({ nickname: 'Ken', challengeId: next });
-    await server.api(`/api/v1/challenges/${next}`, { method: 'DELETE', token: yoh.token });
-    expect(await records()).toEqual([]);
-  });
-
-  it('is updated by a result landing on a deduped challenge', async () => {
-    const body = (facts: Record<string, unknown>) => ({
-      gameId: 'sudoku',
-      contractVersion: 1,
-      params: { difficulty: 'easy' },
-      seed: 'same-board',
-      boardDigest: 'xx1:00000000',
-      result: { outcome: 'completed', facts },
-    });
-    const first = await server.api('/api/v1/challenges', {
-      token: yoh.token,
-      body: body({ elapsedSeconds: 300 }),
-    });
-    const second = await server.api('/api/v1/challenges', {
-      token: ken.token,
-      body: body({ elapsedSeconds: 150 }),
-    });
-    expect(second.status).toBe(200);
-    expect(await records()).toEqual([
-      expect.objectContaining({ nickname: 'Ken', challengeId: first.json.id }),
+    expect(
+      reply.json.map((r: { gameId: string; nickname: string }) => [r.gameId, r.nickname]),
+    ).toEqual([
+      ['2048', 'Yoh'],
+      ['minesweeper', 'Yoh'],
     ]);
   });
 
-  it('never makes a record of a played result', async () => {
-    await challenge(yoh, 'sudoku', { difficulty: 'hard' }, { elapsedSeconds: 10 }, 'played');
-    expect(await records()).toEqual([]);
+  it('never makes a record of a played result, and does not follow challenges', async () => {
+    await rank(yoh, 'sudoku', 'hard', { elapsedSeconds: 10 }, 'played');
+    await challenge(yoh, 'sudoku', { elapsedSeconds: 10 });
+    expect((await server.api('/api/v1/records', { token: yoh.token })).json).toEqual([]);
+  });
+
+  it('survives the deletion of a challenge', async () => {
+    const id = (await challenge(yoh, 'sudoku', { elapsedSeconds: 100 })).json.id;
+    await rank(yoh, 'sudoku', 'hard', { elapsedSeconds: 100 });
+    await server.api(`/api/v1/challenges/${id}`, { method: 'DELETE', token: yoh.token });
+    expect((await server.api('/api/v1/records', { token: yoh.token })).json).toHaveLength(1);
   });
 });
