@@ -6,9 +6,10 @@ Public Club House exists at all: **can one deployment of this server run on Clou
 free plan, with the same club.md §5 contract as the Node server?** The contract part is
 answered here by tests. The cost part is answered here only as far as a local runtime
 can: every number below is either quoted from Cloudflare's documentation with its date,
-or measured in workerd on a laptop. **Nothing has been deployed yet, and no amount of
-money is written in this document** — simple-games `docs/PRODUCT_PRINCIPLES.md`「費用の上限」
-forbids writing a figure before it is measured, and §7 is where the measured one goes.
+or measured — in workerd on a laptop (§3), and since 2026-10-02 against the real
+deployment at `club.pixapps.ai` (§7). **No amount of money is written in this document** —
+simple-games `docs/PRODUCT_PRINCIPLES.md`「費用の上限」forbids writing a figure before it is
+measured, and the dashboard's figures go into §7 as they are read.
 
 ## 1. What runs where
 
@@ -36,6 +37,11 @@ rateLimit}.ts`, `src/validate.ts`, `src/limits.ts`, `src/contracts/games.ts`,
   SQL reaches the engine (`src/db/database.ts`, `src/worker/driver.ts`). The proof of
   sameness is not this list but the tests: `pnpm test` runs the contract tests against
   both deployments (`vitest.config.ts`), and both pass all of them.
+- **Address**: `https://club.pixapps.ai`, a custom domain on the pixapps.ai zone
+  (`wrangler.toml` `routes`); the workers.dev address is off so invite links and CORS
+  have one origin. The Durable Object was created by the first request and lives where
+  that request arrived; a deployment whose players are mostly elsewhere can pass a
+  `locationHint` when the Worker names the object (not done; a PR C decision).
 - **Static files**: the web build goes in `web/`; hashed assets are served by the assets
   binding before the Worker runs, at no charge. Only `/api/*` and the entry pages
   (`/`, `/index.html`, `/join`, `/join/`) reach the Worker (`wrangler.toml`).
@@ -189,22 +195,29 @@ What a stranger can do without a token, and what it costs in units:
   "minimal" (club.md §5-1) and this is within that spirit.
 - **Not verified, not relied on**: whether the zone's free plan includes a WAF rate
   limiting rule usable in front of the Worker. Worth checking before a Public launch.
+- **A client cannot spoof the address.** Cloudflare answers any request that itself
+  carries a `CF-Connecting-IP` header with its error 1000 ("DNS points to prohibited
+  IP", an HTML 403) before the Worker runs — found the hard way when the measurement
+  script sent the header it uses to vary addresses in workerd (§7).
 
 ## 6. Deploying and measuring — the product owner's part
 
 The agent that wrote this never touched a Cloudflare account; these steps need one.
+Steps 1–4 were done on 2026-10-02 (§7); step 5 is read the following day.
 
 1. `pnpm install && pnpm build:worker` — bundles `src/worker/index.ts` exactly as
    `wrangler deploy` will (no account needed; CI runs this).
 2. `pnpm exec wrangler login`, then `pnpm exec wrangler deploy`. The first deploy creates
-   the `ClubObject` namespace with SQLite storage (immutable afterwards) and prints the
-   `*.workers.dev` URL. A custom domain is optional and free.
+   the `ClubObject` namespace with SQLite storage (immutable afterwards), the DNS record
+   and the certificate for the custom domain in `wrangler.toml` (`club.pixapps.ai`).
 3. `pnpm exec wrangler secret put CLUB_SETUP_KEY` with a long random string
    (for example `openssl rand -base64 32`). Optionally `CLUB_SECRET` the same way.
-4. The round trip, by hand (README「Claim the club」has the shapes), in this order:
-   `GET /api/v1/health` → `POST /api/v1/claim` → `GET /api/v1/invite` →
-   `POST /api/v1/join` → `POST /api/v1/challenges` → `POST /api/v1/challenges/:id/results`
-   → `GET /api/v1/records`. `pnpm exec wrangler tail` shows the object's errors live.
+4. The round trip: `CLUB_URL=https://club.pixapps.ai CLUB_SETUP_KEY=… node
+scripts/measure-rows.mjs` runs the same requests as §3 (claim → invite → join →
+   challenge → result → records, then a 9-member club) and prints the round-trip times;
+   the owner it creates is kept in `data/` so a rerun continues instead of claiming
+   again. `pnpm exec wrangler tail --format json` alongside shows every invocation with
+   its CPU time and any exception.
 5. In the dashboard, the next day (metrics lag): **Workers & Pages → simple-games-club →
    Metrics** for Worker requests and CPU time; **Storage & Databases → Durable Objects**
    for object requests, duration (GB-s), rows read, rows written and stored bytes;
@@ -213,11 +226,70 @@ The agent that wrote this never touched a Cloudflare account; these steps need o
 
 ## 7. Measured in production
 
-**Not run.** No deploy has happened; this section is empty on purpose.
+Deployed 2026-10-02 to the account that holds pixapps.ai, on the Workers Free plan, at
+`https://club.pixapps.ai`. Secrets set: `CLUB_SETUP_KEY` (twice — see below); no
+`CLUB_SECRET`, so the object generated its own.
 
-| Date | Requests sent | Worker requests (dashboard) | Object requests | Duration (GB-s) | Rows read | Rows written | Stored | Billed |
-| ---- | ------------- | --------------------------- | --------------- | --------------- | --------- | ------------ | ------ | ------ |
-|      |               |                             |                 |                 |           |              |        |        |
+### The round trip (2026-10-02, `scripts/measure-rows.mjs` against the deployment)
+
+Resumed as the owner the claim had created; 114 requests, **0 server errors, 0 rate
+limited**, every reply the contract's. The client sat behind a connection Cloudflare served
+from Marseille (`cf-ray …-MRS`), so the object was created there too; the times below are
+from that client, not from Japan.
+
+| Step                      | Request                               | Status | Response bytes |  ms |
+| ------------------------- | ------------------------------------- | -----: | -------------: | --: |
+| health (first request)    | `GET /api/v1/health`                  |    200 |             34 | 576 |
+| health                    | `GET /api/v1/health`                  |    200 |             34 | 518 |
+| read invite               | `GET /api/v1/invite`                  |    200 |            101 | 167 |
+| join                      | `POST /api/v1/join`                   |    201 |            255 | 184 |
+| club (2 members)          | `GET /api/v1/club`                    |    200 |            486 | 167 |
+| create challenge + result | `POST /api/v1/challenges`             |    201 |            285 | 187 |
+| list challenges (1)       | `GET /api/v1/challenges`              |    200 |            288 | 165 |
+| one challenge             | `GET /api/v1/challenges/:id`          |    200 |            286 | 161 |
+| submit result             | `POST /api/v1/challenges/:id/results` |    201 |            163 | 181 |
+| results (2)               | `GET /api/v1/challenges/:id/results`  |    200 |            329 | 168 |
+| records (1 challenge)     | `GET /api/v1/records`                 |    200 |            171 | 161 |
+| hosting                   | `GET /api/v1/hosting`                 |    200 |            105 | 158 |
+| 401 (bad token)           | `GET /api/v1/club`                    |    401 |             78 | 159 |
+| 409 (bad invite)          | `POST /api/v1/join`                   |    409 |             77 | 164 |
+| 409 (second result)       | `POST /api/v1/challenges/:id/results` |    409 |             86 | 163 |
+
+With 9 members, 10 challenges and 81 results: `GET /club` 163 ms, `GET /challenges`
+183 ms, `GET /challenges/:id/results` 231 ms, `GET /records` 168 ms. Seeding took 95
+requests in 18.4 s. Median over the run: **184 ms**; the two first requests carry the
+connection setup and the object's cold start.
+
+`wrangler tail` during the run (104 sampled invocations, 68 Worker and 36 object, all
+`outcome: ok`, no exceptions, no error logs):
+
+| Invocation            | CPU time p50 | CPU time p90 | CPU time max | Wall time p50 | Wall time p90 |
+| --------------------- | -----------: | -----------: | -----------: | ------------: | ------------: |
+| Worker (`stateless`)  |         0 ms |         0 ms |         1 ms |         37 ms |         41 ms |
+| Object (`ClubObject`) |         0 ms |         1 ms |         1 ms |          2 ms |         24 ms |
+
+The free plan's 10 ms of CPU per invocation is two orders of magnitude away. The
+Worker's wall time is mostly waiting for the object.
+
+### What went wrong on the way
+
+- The first two runs died on the first authenticated `POST`: Cloudflare's error 1000,
+  because the script sent a `CF-Connecting-IP` header of its own (§5). The second run's
+  claim had already succeeded, so the deployment's first setup key was spent with no
+  owner token saved; the key was re-set once (`wrangler secret put CLUB_SETUP_KEY`),
+  the recovery club.md §8-3 describes, and the club now has two owners named "Yoh".
+  The script now keeps the owner it creates and sends the header only to workerd.
+- A `timeout` prefix is not available on macOS; `wrangler tail` ran without one.
+- The new hostname was cached as non-existent by the local resolver for the zone's
+  1,800 s negative TTL; the run used a resolver preload for that machine only.
+
+### Dashboard figures
+
+To be read the following day (metrics lag) and written here with the date.
+
+| Date       | Requests sent                                                | Worker requests (dashboard) | Object requests | Duration (GB-s) | Rows read | Rows written | Stored  | Billed  |
+| ---------- | ------------------------------------------------------------ | --------------------------- | --------------- | --------------- | --------- | ------------ | ------- | ------- |
+| 2026-10-02 | ≈ 140 (114 in the run, the rest probes and two aborted runs) | pending                     | pending         | pending         | pending   | pending      | pending | pending |
 
 ## 8. What this spike settles, and what it leaves open
 
@@ -225,7 +297,8 @@ Settled by the code and its tests:
 
 - **A Durable Object satisfies club.md §5.** The 56 contract tests that run against the
   Node server run unchanged against the Worker in workerd and pass; the two files that
-  do not are Node's static file server and Node's unit tests.
+  do not are Node's static file server and Node's unit tests. The same round trip then
+  ran against the real deployment with every reply as the contract says (§7).
 - **One object per deployment is enough for the contract**, and the name is the only
   thing to change if it ever is not.
 - **Limits are enforced from the first request** with the same code and numbers as
