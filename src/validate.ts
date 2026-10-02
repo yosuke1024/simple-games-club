@@ -65,7 +65,7 @@ export function smallObject(
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw invalidRequest(`${name} must be a JSON object`);
   }
-  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > maxBytes) {
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > maxBytes) {
     throw invalidRequest(`${name} exceeds ${maxBytes} bytes`);
   }
   return value as Record<string, unknown>;

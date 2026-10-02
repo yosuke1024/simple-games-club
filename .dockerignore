@@ -1,7 +1,11 @@
 node_modules
 dist
+dist-worker
+.wrangler
 data
 test
+scripts
+wrangler.toml
 .git
 .github
 *.md

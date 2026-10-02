@@ -8,6 +8,7 @@
 import { createReadStream, statSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
+import { PLACEHOLDER_HTML } from './placeholder.js';
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.html': 'text/html; charset=utf-8',
@@ -28,25 +29,6 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   '.webmanifest': 'application/manifest+json',
   '.map': 'application/json',
 };
-
-const PLACEHOLDER = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Simple Games Club</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 36rem; padding: 0 1rem; color: #232a33; }
-  code { background: #f2f0ea; padding: 0.1em 0.3em; border-radius: 4px; }
-</style>
-</head>
-<body>
-<h1>Simple Games Club</h1>
-<p>This server is running, but the Simple Games web build is not installed, so there is nothing to play here yet.</p>
-<p>The API answers at <code>/api/v1/health</code>. To serve the games from this address, put the web build in the directory named by <code>CLUB_WEB_DIR</code> (see the README).</p>
-</body>
-</html>
-`;
 
 export interface StaticOptions {
   webDir: string;
@@ -94,7 +76,7 @@ export function serveStatic(
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache',
       });
-      res.end(req.method === 'HEAD' ? undefined : PLACEHOLDER);
+      res.end(req.method === 'HEAD' ? undefined : PLACEHOLDER_HTML);
       return true;
     }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });

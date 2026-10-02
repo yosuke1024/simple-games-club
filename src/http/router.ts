@@ -19,6 +19,8 @@ export interface Ctx {
   body: () => Promise<JsonObject>;
   /** The origin invite URLs are built on: the configured one, else the request's. */
   origin: string;
+  /** The request's clock (src/http/api.ts); handlers never read Date.now(). */
+  now: Date;
 }
 
 export interface Reply {

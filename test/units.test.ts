@@ -107,3 +107,26 @@ describe('loadConfig', () => {
     expect(loadConfig({ CLUB_DATA_DIR: dir }).setupKey).toBeNull();
   });
 });
+
+describe('wrangler.toml (the Cloudflare deployment)', () => {
+  // Comments stripped: the file is allowed to *mention* a name it must not set.
+  const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8')
+    .split('\n')
+    .map((line) => line.replace(/#.*$/, ''))
+    .join('\n');
+
+  it('never ships the test-only bindings the Workers harness sets', () => {
+    // CLUB_TEST_MODE lets a request choose the clock; CLUB_TRUST_PROXY makes
+    // the object believe X-Forwarded-For. Both exist for test/impl/workers.ts.
+    expect(toml).not.toMatch(/CLUB_TEST_MODE/);
+    expect(toml).not.toMatch(/CLUB_TRUST_PROXY/);
+    // Secrets are set on the deployment, never written here.
+    expect(toml).not.toMatch(/^\s*CLUB_SETUP_KEY\s*=/m);
+    expect(toml).not.toMatch(/^\s*CLUB_SECRET\s*=/m);
+  });
+
+  it('keeps the object on SQLite storage — the only backend the Free plan has', () => {
+    expect(toml).toMatch(/new_sqlite_classes\s*=\s*\[\s*"ClubObject"\s*\]/);
+    expect(toml).not.toMatch(/new_classes\s*=/);
+  });
+});

@@ -26,7 +26,7 @@ export function registerInvites(router: Router, deps: Deps): void {
   router.add('GET', '/api/v1/invite', { auth: 'owner', limit: 'member' }, (ctx) => {
     // The claim always creates one, so this only mints for a database that
     // predates that rule — never for a rotation the owner did not ask for.
-    const invite = store.memberInvite() ?? freshMemberInvite(iso(deps.now()));
+    const invite = store.memberInvite() ?? freshMemberInvite(iso(ctx.now));
     const token = invite.token!;
     return { status: 200, body: { token, url: inviteUrl(ctx.origin, token) } };
   });
@@ -34,7 +34,7 @@ export function registerInvites(router: Router, deps: Deps): void {
   router.add('POST', '/api/v1/invite', { auth: 'owner', limit: 'member' }, async (ctx) => {
     const body = await ctx.body();
     const role = v.role(body.role);
-    const now = deps.now();
+    const now = ctx.now;
     const nowIso = iso(now);
 
     if (role === 'member') {

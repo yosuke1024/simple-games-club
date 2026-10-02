@@ -7,23 +7,39 @@
  * tokens have full entropy, so what the hash buys is that a copied database
  * file contains nothing that authenticates.
  */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const INVITE_TOKEN_BYTES = 16;
 export const OWNER_LINK_BYTES = 16;
 export const MEMBER_TOKEN_BYTES = 32;
 
-export const randomToken = (bytes: number): string => randomBytes(bytes).toString('base64url');
+// Web Crypto for the random bytes and plain encoders, so this file reads the
+// same on Node and in a Worker without a Buffer in between.
+const randomBytes = (count: number): Uint8Array => crypto.getRandomValues(new Uint8Array(count));
 
-export const newId = (prefix: string): string =>
-  `${prefix}_${randomBytes(9).toString('base64url')}`;
+const base64url = (bytes: Uint8Array): string =>
+  btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+const hex = (bytes: Uint8Array): string =>
+  Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+export const randomToken = (bytes: number): string => base64url(randomBytes(bytes));
+
+/** A generated secret, as `CLUB_SECRET` would be written: 64 hex characters for 32 bytes. */
+export const randomHex = (bytes: number): string => hex(randomBytes(bytes));
+
+export const newId = (prefix: string): string => `${prefix}_${base64url(randomBytes(9))}`;
 
 export const hashToken = (secret: string, token: string): string =>
   createHash('sha256').update(`${secret}:${token}`).digest('hex');
 
 export function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, 'utf8');
-  const right = Buffer.from(b, 'utf8');
+  const encoder = new TextEncoder();
+  const left = encoder.encode(a);
+  const right = encoder.encode(b);
   return left.length === right.length && timingSafeEqual(left, right);
 }
 

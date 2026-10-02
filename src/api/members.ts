@@ -16,7 +16,7 @@ export function registerMembers(router: Router, deps: Deps): void {
     if (target.role === 'owner' && store.countActive('owner') <= 1) {
       throw conflict('last_owner', 'the last owner cannot be removed');
     }
-    store.revokeMember(target.id, iso(deps.now()));
+    store.revokeMember(target.id, iso(ctx.now));
     return { status: 204 };
   });
 }

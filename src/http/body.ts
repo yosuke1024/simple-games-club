@@ -1,38 +1,48 @@
 /**
  * Reading a JSON body with the contract's ceiling (16KB → 413). The limit is
  * enforced on the bytes actually received, not only on Content-Length, so a
- * chunked request cannot talk its way past it.
+ * chunked request cannot talk its way past it. The source is abstract so the
+ * same check runs on a Node `IncomingMessage` and on a Fetch `Request`.
  */
-import type { IncomingMessage } from 'node:http';
 import { invalidRequest, tooLarge } from './errors.js';
 
 export type JsonObject = Record<string, unknown>;
 
+export interface BodySource {
+  contentLength: string | undefined;
+  contentType: string | undefined;
+  chunks(): AsyncIterable<Uint8Array>;
+}
+
 const isObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-export async function readJsonObject(req: IncomingMessage, limit: number): Promise<JsonObject> {
-  const declared = Number(req.headers['content-length']);
+export async function readJsonObject(body: BodySource, limit: number): Promise<JsonObject> {
+  const declared = Number(body.contentLength);
   if (Number.isFinite(declared) && declared > limit) {
     throw tooLarge(`body exceeds ${limit} bytes`);
   }
-  const type = req.headers['content-type'] ?? '';
-  if (!/^application\/json\b/i.test(type)) {
+  if (!/^application\/json\b/i.test(body.contentType ?? '')) {
     throw invalidRequest('Content-Type must be application/json');
   }
 
-  const chunks: Buffer[] = [];
+  const chunks: Uint8Array[] = [];
   let received = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    received += buffer.length;
+  for await (const chunk of body.chunks()) {
+    received += chunk.byteLength;
     if (received > limit) throw tooLarge(`body exceeds ${limit} bytes`);
-    chunks.push(buffer);
+    chunks.push(chunk);
+  }
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
     throw invalidRequest('body is not valid JSON');
   }

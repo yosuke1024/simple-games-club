@@ -19,5 +19,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "test", "vitest.config.ts", "eslint.config.js"]
+  "include": ["src", "test", "vitest.config.ts", "eslint.config.js"],
+  "exclude": ["src/worker", "node_modules", "dist", "dist-worker"]
 }

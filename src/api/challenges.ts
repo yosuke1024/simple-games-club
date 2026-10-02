@@ -34,7 +34,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     const outcome = v.outcome(result.outcome);
     const facts = v.smallObject(result.facts, 'result.facts', limits.smallJsonBytes);
 
-    const now = iso(deps.now());
+    const now = iso(ctx.now);
     const id = newId('ch');
     store.createChallenge({
       id,
@@ -74,7 +74,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     if (challenge.createdBy.id !== member.id && member.role !== 'owner') {
       throw forbidden('only the creator or an owner can delete a challenge');
     }
-    store.deleteChallenge(challenge.id, iso(deps.now()));
+    store.deleteChallenge(challenge.id, iso(ctx.now));
     return { status: 204 };
   });
 
@@ -118,7 +118,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
         throw conflict('already_submitted', 'one result per member per challenge');
       }
 
-      const now = iso(deps.now());
+      const now = iso(ctx.now);
       const result = store.addResult({
         challengeId: challenge.id,
         memberId: member.id,

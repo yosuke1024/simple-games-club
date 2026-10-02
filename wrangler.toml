@@ -1,0 +1,47 @@
+# The Cloudflare deployment (src/worker/index.ts): one Worker, one SQLite-backed
+# Durable Object, the web build as static assets. The same club.md §5 contract
+# as the Node server, proven by the same tests (test/impl/workers.ts).
+#
+# What this file cannot carry is set on the deployment:
+#   wrangler secret put CLUB_SETUP_KEY   # claims the club once (README「Claim the club」)
+#   wrangler secret put CLUB_SECRET      # optional; generated into the object when absent
+# Never CLUB_TEST_MODE (test/units.test.ts checks).
+name = "simple-games-club"
+main = "src/worker/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# The deployment's one address: a custom domain on a zone this account holds.
+# wrangler creates the DNS record and the certificate on deploy. The
+# workers.dev address is off — one origin for invite links and CORS.
+routes = [{ pattern = "club.pixapps.ai", custom_domain = true }]
+workers_dev = false
+
+# Hashed assets are served here, free and before the Worker runs; only the
+# API and the entry pages reach the Worker (and so count as requests).
+[assets]
+directory = "./web"
+binding = "ASSETS"
+not_found_handling = "none"
+run_worker_first = ["/api/*", "/", "/index.html", "/join", "/join/"]
+
+[[durable_objects.bindings]]
+name = "CLUB"
+class_name = "ClubObject"
+
+# SQLite storage is the only backend the Free plan allows, and the type is
+# fixed at creation (docs/cloudflare.md).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ClubObject"]
+
+[vars]
+CLUB_HOSTING_PROVIDER = "cloudflare"
+# Invite links name this origin whichever hostname the request arrived on.
+CLUB_PUBLIC_ORIGIN = "https://club.pixapps.ai"
+
+# Workers Logs: the request count is visible in the dashboard either way; this
+# keeps the object's console.error (a 500) readable. Free plan: 200,000 events
+# a day, 3 days of retention (docs/cloudflare.md).
+[observability]
+enabled = true
