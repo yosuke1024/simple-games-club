@@ -6,7 +6,8 @@
  * object runs the same `createApi` as the Node server (src/http/api.ts) on
  * its own SQLite, so club.md §5 is implemented once and carried twice.
  *
- * One deployment is one club (club.md §1), so one object, named below. The
+ * One deployment is one club (club.md §1), so one object, named by
+ * `CLUB_OBJECT_NAME` (default `club`). The
  * name is the shard key and nothing else knows it: a deployment that one day
  * needs more than one object changes how the Worker derives the name, not
  * the contract (simple-games-club#1「One public room, but not necessarily one
@@ -16,12 +17,14 @@ import { DurableObject } from 'cloudflare:workers';
 import { migrate, type SqlDriver } from '../db/driver.js';
 import { Store } from '../db/store.js';
 import { API_VERSION_HEADER, API_VERSION_VALUE, createApi, type Api } from '../http/api.js';
+import { corsHeaders } from '../http/cors.js';
 import { PLACEHOLDER_HTML } from '../http/placeholder.js';
 import { sqlDriver, type RowCounter } from './driver.js';
 import { apiConfigFrom, settingsFrom, type Env, type WorkerSettings } from './env.js';
 import { randomHex } from '../auth/tokens.js';
 
-const CLUB_OBJECT_NAME = 'club';
+/** The object's name when `CLUB_OBJECT_NAME` is not set. */
+const DEFAULT_OBJECT_NAME = 'club';
 
 /** Set by the Worker for the object; whatever a client sent under these names is overwritten. */
 const CLIENT_IP_HEADER = 'X-Club-Client-Ip';
@@ -95,8 +98,45 @@ async function servePage(request: Request, url: URL, env: Env): Promise<Response
   });
 }
 
+/**
+ * `GET /api/v1/public` is answered from `caches.default` for the five minutes
+ * its `Cache-Control` names (club.md §18): a hit never reaches the object. The
+ * key is the object's name, the date (resolved, never blank) and — only for an origin CORS would allow — that origin,
+ * because the cached response carries its `Access-Control-Allow-Origin`; an
+ * arbitrary `Origin` header cannot mint keys. Only a 200 is stored.
+ */
+async function servePublic(
+  request: Request,
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+  settings: WorkerSettings,
+  forward: () => Promise<Response>,
+): Promise<Response> {
+  const given = url.searchParams.get('date');
+  if (given !== null && !/^\d{4}-\d{2}-\d{2}$/.test(given)) return forward();
+  // No date means "today" on the object's clock: resolved here so the key never
+  // outlives the day it was made for.
+  const date = given ?? requestNow(request, settings.testMode).toISOString().slice(0, 10);
+  const origin = request.headers.get('origin');
+  const selfUrlOrigin = selfOrigin(request, url, settings);
+  const allowed =
+    origin !== null &&
+    Object.keys(corsHeaders(origin, selfUrlOrigin, apiConfigFrom(env, '').corsOrigins)).length > 0;
+  const objectName = env.CLUB_OBJECT_NAME?.trim() || DEFAULT_OBJECT_NAME;
+  const key = new Request(
+    `${url.origin}${url.pathname}?object=${encodeURIComponent(objectName)}&date=${date}&origin=${allowed ? encodeURIComponent(origin) : ''}`,
+  );
+  const cache = caches.default;
+  const hit = await cache.match(key);
+  if (hit !== undefined) return hit;
+  const response = await forward();
+  if (response.status === 200) ctx.waitUntil(cache.put(key, response.clone()));
+  return response;
+}
+
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/api/')) return servePage(request, url, env);
 
@@ -104,8 +144,14 @@ export default {
     const forwarded = new Request(request);
     forwarded.headers.set(CLIENT_IP_HEADER, clientIp(request, settings.trustProxy));
     forwarded.headers.set(ORIGIN_HEADER, selfOrigin(request, url, settings));
-    const stub = env.CLUB.get(env.CLUB.idFromName(CLUB_OBJECT_NAME));
-    return stub.fetch(forwarded);
+    const stub = env.CLUB.get(
+      env.CLUB.idFromName(env.CLUB_OBJECT_NAME?.trim() || DEFAULT_OBJECT_NAME),
+    );
+    const forward = () => stub.fetch(forwarded);
+    if (request.method === 'GET' && url.pathname === '/api/v1/public') {
+      return servePublic(request, url, env, ctx, settings, forward);
+    }
+    return forward();
   },
 } satisfies ExportedHandler<Env>;
 

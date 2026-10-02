@@ -26,6 +26,8 @@ export interface Ctx {
 export interface Reply {
   status: number;
   body?: unknown;
+  /** Replaces the defaults of src/http/api.ts by name (`Cache-Control` on the public view). */
+  headers?: Record<string, string>;
 }
 
 export type Handler = (ctx: Ctx) => Promise<Reply> | Reply;

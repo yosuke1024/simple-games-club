@@ -19,7 +19,23 @@ function stringField(value: unknown, name: string, min: number, max: number): st
   return trimmed;
 }
 
-export const nickname = (value: unknown): string => stringField(value, 'nickname', 1, 24);
+/**
+ * A display name (club.md §17-1): NFC, trimmed, runs of whitespace collapsed to
+ * one space; no control, format (zero-width joiners included), private-use,
+ * surrogate or unassigned code point; at least one letter or number; 1..24
+ * code points. There is no word list, on purpose.
+ */
+const NICKNAME_FORBIDDEN = /[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Cn}]/u;
+const LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
+export const nickname = (value: unknown): string => {
+  if (typeof value !== 'string') throw invalidRequest('nickname must be a string');
+  const name = value.normalize('NFC').trim().replace(/\s+/gu, ' ');
+  const length = [...name].length;
+  if (length < 1 || length > 24) throw invalidRequest('nickname must be 1..24 characters');
+  if (NICKNAME_FORBIDDEN.test(name)) throw invalidRequest('nickname contains unusable characters');
+  if (!LETTER_OR_NUMBER.test(name)) throw invalidRequest('nickname needs a letter or a number');
+  return name;
+};
 export const clubName = (value: unknown): string => stringField(value, 'name', 1, 40);
 export const seed = (value: unknown): string => stringField(value, 'seed', 1, 80);
 /** A ranking result's seed may be empty: an arcade run has no board to name (club.md §16-1). */

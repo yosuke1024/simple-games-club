@@ -16,6 +16,8 @@ export interface Limits {
   bodyBytes: number;
   /** `params` and `facts`, serialized. */
   smallJsonBytes: number;
+  /** `GET /club` lists this many of the newest members; `memberCount` is the total (club.md §17-2). */
+  membersPage: number;
   /** `GET /challenges` page size. */
   challengePage: number;
   /** `GET /challenges/:id/results`. */
@@ -43,6 +45,7 @@ export const DEFAULT_LIMITS: Limits = {
   memberPerMinute: 60,
   bodyBytes: 16 * 1024,
   smallJsonBytes: 1024,
+  membersPage: 50,
   challengePage: 50,
   resultsPage: 200,
   rankingTop: 50,

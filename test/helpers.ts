@@ -51,6 +51,8 @@ export interface ServerOptions {
   corsOrigins: string[];
   hosting: HostingConfig;
   openJoin: boolean;
+  /** Workers only: the Durable Object's name (`CLUB_OBJECT_NAME`); Node ignores it. */
+  objectName: string | null;
 }
 
 export const DEFAULTS: ServerOptions = {
@@ -61,6 +63,7 @@ export const DEFAULTS: ServerOptions = {
   corsOrigins: [],
   hosting: { provider: null, manageUrl: null },
   openJoin: false,
+  objectName: null,
 };
 
 export const newClock = (): Clock => ({

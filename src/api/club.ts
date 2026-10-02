@@ -6,7 +6,7 @@ import type { Deps } from './deps.js';
 import { clubShape, memberShape } from './shape.js';
 
 export function registerClub(router: Router, deps: Deps): void {
-  const { store } = deps;
+  const { store, limits } = deps;
 
   router.add('GET', '/api/v1/club', { auth: 'member', limit: 'member' }, (ctx) => {
     const club = store.getClub();
@@ -16,7 +16,8 @@ export function registerClub(router: Router, deps: Deps): void {
       body: {
         club: clubShape(club),
         me: memberShape(ctx.member!),
-        members: store.activeMembers().map(memberShape),
+        memberCount: store.countActive(),
+        members: store.newestMembers(limits.membersPage).map(memberShape),
       },
     };
   });

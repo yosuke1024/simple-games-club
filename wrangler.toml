@@ -36,6 +36,11 @@ tag = "v1"
 new_sqlite_classes = ["ClubObject"]
 
 [vars]
+# The Durable Object this deployment talks to (idFromName). A new name is a new, empty
+# club: the object that holds the measurement data stays where it is, unreferenced
+# (simple-games docs/architecture/club.md §14 判断 17, §17-4). Claim it with
+# scripts/claim-public.mjs.
+CLUB_OBJECT_NAME = "club-2026-10"
 # This file is the Public deployment's configuration: anyone may join without an invite.
 CLUB_OPEN_JOIN = "1"
 # Anyone may join, so the member cap is the abuse ceiling, not a club size
