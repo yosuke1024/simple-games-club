@@ -301,21 +301,32 @@ What a stranger can do without a token, and what it costs in units:
   and of `facts`, and a club to 100 members (owners included). For a Public deployment
   the member cap is the lever that bounds everything else; what it should be is a
   PR C question.
-- **`PATCH /me` and `DELETE /me/records` read only the caller's own rows.** Both look
-  rows up by `member_id`, and neither `results` (its unique key leads with `challenge_id`)
-  nor `ranking_entries` (its key leads with `game_id, params_key`) has a key that starts
-  there, so `results_member` and `ranking_entries_member` (src/db/schema.ts) exist for
-  them. Without those two indexes each call read every row of both tables — a member
-  could spend the free plan's 5 million rows a day by looping on it at the 60 requests a
-  minute the limiter allows. Measured in workerd (`X-Club-Rows`, test/members.test.ts):
-  a rename reads 6 rows and an erase of one result and one ranking row reads 17, the same
-  with 3 or 40 other members' results in the club; without the indexes the same calls read
-  122 and 249 rows at 40 members. The price is **one more row written** per result
-  (6 → 7 for a member's) and per new ranking entry (7 → 8, measured); improving one's own
-  entry should write no index row, since `member_id` does not change (not measured). The indexes are created
-  with `IF NOT EXISTS` on every start like the other index sets, so no schema version
-  carries them; the first start after an upgrade builds them from the existing rows
-  (one read and one write per row, once).
+- **A member's own levers read only their own rows.** `PATCH /me` (rename) and the owner's
+  removal with the work look rows up by `member_id`, and neither `results` (its unique key
+  leads with `challenge_id`) nor `ranking_entries` (its key leads with `game_id, params_key`)
+  has a key that starts there, so `results_member` and `ranking_entries_member`
+  (src/db/schema.ts) exist for them. Without those two indexes a rename read every row of
+  both tables — a member could spend the free plan's 5 million rows a day by looping on it at
+  the 60 requests a minute the limiter allows. The per-record deletes need no member index:
+  `DELETE /rankings/:gameId/:paramsKey/me` reads the caller's row by primary key and, only
+  when the leader leaves, finds the next one with two one-row walks of
+  `ranking_entries_table` (the best value, then the earliest `seq` at it), and
+  `DELETE /challenges/:id/results/me` uses the `(challenge_id, member_id)` key. Measured in
+  workerd (`X-Club-Rows`, test/members.test.ts): a rename, a delete of the leading row of a
+  lower-is-better table and of a higher-is-better table, and a delete of a result each read
+  7 rows, the same with 3 or 40 other members' rows in the club (the test also fails when the
+  leader lookup is made to scan: 12 → 86 rows). The price of the indexes is **one more row
+  written** per result (6 → 7 for a member's) and per new ranking entry (7 → 8, measured);
+  improving one's own entry should write no index row, since `member_id` does not change
+  (not measured). The indexes are created with `IF NOT EXISTS` on every start like the other
+  index sets, so no schema version carries them; the first start after an upgrade builds them
+  from the existing rows (one read and one write per row, once).
+- **A deleted result leaves a one-row mark.** `withdrawn_results (challenge_id, member_id)`
+  is written by `DELETE /challenges/:id/results/me` (one row written, once per deleted
+  result) and looked up by primary key only when a submission finds no result of the
+  member's — one more primary-key lookup per first submission (not measured). The table
+  is created with `IF NOT EXISTS`, so no schema version carries it; it grows by at most one
+  row per member per challenge, and a member's own delete is the only writer.
 - **The object's limiter is in memory.** An eviction (idle ~10 s, or a redeploy) forgets
   the current minute; the next minute is counted again. The contract's limits are
   "minimal" (club.md §5-1) and this is within that spirit.

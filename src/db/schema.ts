@@ -39,6 +39,12 @@ export const SCHEMA_VERSION = 5;
  * daily's top three walk an index instead of every result of the day; and an index on
  * `ranking_tables (entry_count DESC, …)` so the landing page's most-played tables are the
  * first eight rows of a read, not a scan of every table.
+ *
+ * Also v5, same unreleased step (no version of its own): `withdrawn_results` — one row per
+ * (challenge, member) who deleted their own result from that challenge. It is what keeps
+ * "one result per member per challenge" true after the delete: a later submission by that
+ * member is refused (409 `already_submitted`), so deleting a day's result means leaving that
+ * day's challenge. `CREATE TABLE IF NOT EXISTS`, so an existing v5 database gains it on start.
  */
 
 export const SCHEMA_SQL = `
@@ -114,6 +120,12 @@ CREATE TABLE IF NOT EXISTS results (
   UNIQUE (challenge_id, member_id)
 );
 
+CREATE TABLE IF NOT EXISTS withdrawn_results (
+  challenge_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  PRIMARY KEY (challenge_id, member_id)
+);
+
 CREATE TABLE IF NOT EXISTS ranking_entries (
   game_id TEXT NOT NULL,
   params_key TEXT NOT NULL,
@@ -180,8 +192,8 @@ CREATE INDEX IF NOT EXISTS ranking_tables_popular
 
 /**
  * A member's own rows. Neither table's key leads with `member_id` (results: `challenge_id`;
- * ranking_entries: `game_id, params_key`), so without these a member's rename or erase
- * (`PATCH /me`, `DELETE /me/records`) reads every row of both tables. Like the other indexes
+ * ranking_entries: `game_id, params_key`), so without these a member's rename (`PATCH /me`) or
+ * the owner's removal with the work reads every row of both tables. Like the other indexes
  * they are created idempotently on every start, so no schema version is needed; the price is
  * one more index row written per result and per new ranking entry (docs/cloudflare.md §5).
  */

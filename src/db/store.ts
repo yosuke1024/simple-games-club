@@ -108,10 +108,6 @@ export interface RankingTableRow {
 }
 
 const directionOf = (gameId: string): Direction => contractOf(gameId)?.direction ?? 'asc';
-/** `ORDER BY` for a table, best first; ties by arrival (`seq`), earlier first. */
-const orderBy = (direction: Direction): string =>
-  `value ${direction === 'asc' ? 'ASC' : 'DESC'}, seq`;
-
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
   const value = row[key];
@@ -186,9 +182,16 @@ const toResult = (row: Row): ResultRow => ({
   facts: parseJson(text(row, 'facts_json')),
 });
 
+// `mine`: the viewer has a result here, or withdrew one (DELETE …/results/me) and so can
+// send nothing more to this challenge — either way the challenge is no longer theirs to play
+// for a result. One bound parameter, read twice through the derived row.
 const CHALLENGE_SELECT = `
   SELECT c.*, m.nickname AS creator_nickname,
-    EXISTS (SELECT 1 FROM results r WHERE r.challenge_id = c.id AND r.member_id = ?) AS mine
+    EXISTS (
+      SELECT 1 FROM (SELECT ? AS viewer) me
+      WHERE EXISTS (SELECT 1 FROM results r WHERE r.challenge_id = c.id AND r.member_id = me.viewer)
+         OR EXISTS (SELECT 1 FROM withdrawn_results w WHERE w.challenge_id = c.id AND w.member_id = me.viewer)
+    ) AS mine
   FROM challenges c
   JOIN members m ON m.id = c.created_by
   WHERE c.deleted_at IS NULL`;
@@ -310,80 +313,102 @@ export class Store {
 
   /**
    * The owner's remedy of removing with the work (club.md §17-3): the member's
-   * records (`eraseRecords`) and the reports against them. Call `revokeMember`
-   * as well; this does not.
+   * results (and their challenges' `result_count`), their ranking rows (and each
+   * table's summary row: count, leader), and the reports against them. Call
+   * `revokeMember` as well; this does not.
    */
   purgeMember(id: string): void {
-    this.eraseRecords(id);
-    this.clearReports(id);
-  }
-
-  /**
-   * A member's own work and nothing else: their results (and their challenges'
-   * `result_count`) and their ranking rows (and each table's summary row: count,
-   * leader). The member, their token and the reports against them stay — it is
-   * the one implementation behind the owner's purge and `DELETE /me/records`.
-   * Challenges they created stay too: other members' results hang off them.
-   */
-  eraseRecords(id: string): void {
     this.db.run(
       `UPDATE challenges SET result_count = result_count - 1
        WHERE id IN (SELECT challenge_id FROM results WHERE member_id = ?)`,
       id,
     );
     this.db.run(`DELETE FROM results WHERE member_id = ?`, id);
-
     const tables = this.db.all(
       `SELECT game_id, params_key FROM ranking_entries WHERE member_id = ?`,
       id,
     );
-    this.db.run(`DELETE FROM ranking_entries WHERE member_id = ?`, id);
     for (const table of tables) {
-      const gameId = text(table, 'game_id');
-      const paramsKey = text(table, 'params_key');
-      const summary = this.db.get(
-        `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-        gameId,
-        paramsKey,
-      );
-      if (summary === undefined) continue;
-      const count = int(summary, 'entry_count') - 1;
-      if (count <= 0) {
-        this.db.run(
-          `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-          gameId,
-          paramsKey,
-        );
-        continue;
-      }
-      let leader = text(summary, 'leader_member_id');
-      if (leader === id) {
-        const next = this.db.get(
-          `SELECT member_id FROM ranking_entries WHERE game_id = ? AND params_key = ?
-           ORDER BY ${orderBy(directionOf(gameId))} LIMIT 1`,
-          gameId,
-          paramsKey,
-        );
-        // Out of step with the entries (cannot happen): the table is empty after all.
-        if (next === undefined) {
-          this.db.run(
-            `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-            gameId,
-            paramsKey,
-          );
-          continue;
-        }
-        leader = text(next, 'member_id');
-      }
-      this.db.run(
-        `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
-         WHERE game_id = ? AND params_key = ?`,
-        count,
-        leader,
-        gameId,
-        paramsKey,
-      );
+      this.dropRankingEntry(text(table, 'game_id'), text(table, 'params_key'), id);
     }
+    this.clearReports(id);
+  }
+
+  /**
+   * A member deleting their own row in one ranking table (club.md §5-3
+   * `DELETE /rankings/:gameId/:paramsKey/me`). Returns false when they have none.
+   * A later finished game enters the table again as usual. Reads by primary key.
+   */
+  removeRankingEntry(gameId: string, paramsKey: string, memberId: string): boolean {
+    if (this.rankingEntry(gameId, paramsKey, memberId) === null) return false;
+    this.dropRankingEntry(gameId, paramsKey, memberId);
+    return true;
+  }
+
+  /**
+   * Deletes the member's row of a table that has one and keeps the table's summary row
+   * (count, leader) in step: the table's row goes when it empties, and when the leader
+   * leaves, the next leader is the best remaining value, the earliest on a tie. Both reads
+   * walk `ranking_entries_table`, so they read one row each however large the table is.
+   */
+  private dropRankingEntry(gameId: string, paramsKey: string, memberId: string): void {
+    this.db.run(
+      `DELETE FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+      gameId,
+      paramsKey,
+      memberId,
+    );
+    const summary = this.db.get(
+      `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+      gameId,
+      paramsKey,
+    );
+    if (summary === undefined) return;
+    const dropTable = (): void =>
+      this.db.run(
+        `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+        gameId,
+        paramsKey,
+      );
+    const count = int(summary, 'entry_count') - 1;
+    if (count <= 0) {
+      dropTable();
+      return;
+    }
+    let leader = text(summary, 'leader_member_id');
+    if (leader === memberId) {
+      const best = this.db.get(
+        `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ?
+         ORDER BY value ${directionOf(gameId) === 'asc' ? 'ASC' : 'DESC'} LIMIT 1`,
+        gameId,
+        paramsKey,
+      );
+      const next =
+        best === undefined
+          ? undefined
+          : this.db.get(
+              `SELECT member_id FROM ranking_entries
+               WHERE game_id = ? AND params_key = ? AND value = ? ORDER BY seq LIMIT 1`,
+              gameId,
+              paramsKey,
+              Number(best.value),
+            );
+      // Out of step with the entries (cannot happen): the table is empty after all.
+      if (next === undefined) {
+        dropTable();
+        return;
+      }
+      leader = text(next, 'member_id');
+    }
+    // The count changed, so `ranking_tables_popular` is rewritten anyway.
+    this.db.run(
+      `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
+       WHERE game_id = ? AND params_key = ?`,
+      count,
+      leader,
+      gameId,
+      paramsKey,
+    );
   }
 
   // ---------- reports (club.md §17-3) ----------
@@ -613,7 +638,45 @@ export class Store {
     return rows;
   }
 
-  hasResult(challengeId: string, memberId: string): boolean {
+  /**
+   * Whether the member has sent a result to this challenge: one they still have, or one they
+   * deleted (`withdrawResult` leaves a mark). Either way they may not send another —
+   * "one result per member per challenge" outlives the delete.
+   */
+  alreadySubmitted(challengeId: string, memberId: string): boolean {
+    return (
+      this.hasResult(challengeId, memberId) ||
+      this.db.get(
+        `SELECT 1 FROM withdrawn_results WHERE challenge_id = ? AND member_id = ?`,
+        challengeId,
+        memberId,
+      ) !== undefined
+    );
+  }
+
+  /**
+   * A member deleting their own result from a challenge (club.md §5-3
+   * `DELETE /challenges/:id/results/me`): the row goes, `result_count` follows, and a
+   * withdrawal mark is written so they cannot send another. Returns false when they have
+   * no result there. Both reads and the delete use the `(challenge_id, member_id)` key.
+   */
+  withdrawResult(challengeId: string, memberId: string): boolean {
+    if (!this.hasResult(challengeId, memberId)) return false;
+    this.db.run(
+      `DELETE FROM results WHERE challenge_id = ? AND member_id = ?`,
+      challengeId,
+      memberId,
+    );
+    this.db.run(`UPDATE challenges SET result_count = result_count - 1 WHERE id = ?`, challengeId);
+    this.db.run(
+      `INSERT OR IGNORE INTO withdrawn_results (challenge_id, member_id) VALUES (?, ?)`,
+      challengeId,
+      memberId,
+    );
+    return true;
+  }
+
+  private hasResult(challengeId: string, memberId: string): boolean {
     return (
       this.db.get(
         `SELECT 1 FROM results WHERE challenge_id = ? AND member_id = ?`,

@@ -489,99 +489,109 @@ describe('PATCH /api/v1/me', () => {
   });
 });
 
-describe('DELETE /api/v1/me/records', () => {
-  it("erases the caller's results and ranking rows, fixes counts and leader, and keeps them in the Club", async () => {
+const deleteRanking = (who: Session | undefined, gameId: string, paramsKey: string) =>
+  server.api(`/api/v1/rankings/${gameId}/${paramsKey}/me`, {
+    method: 'DELETE',
+    token: who?.token,
+  });
+
+const deleteResult = (who: Session | undefined, challengeId: string) =>
+  server.api(`/api/v1/challenges/${challengeId}/results/me`, {
+    method: 'DELETE',
+    token: who?.token,
+  });
+
+describe('DELETE /api/v1/rankings/:gameId/:paramsKey/me', () => {
+  it("deletes the caller's row in that table only, moves the lead, and lets the next game enter again", async () => {
     const owner = await claimOwner(server, 'Yoh');
     const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
     const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
-
-    const challenge = await createChallenge(owner, 'seed-a', 300);
+    const challenge = await createChallenge(ken, 'seed-a', 200);
     const id = challenge.json.id;
-    await sendChallengeResult(ken, id, 200);
     await sendChallengeResult(mai, id, 250);
+    // sudoku is lower-is-better: Ken leads, Mai second, Yoh last.
     await submitRanking(owner, 'sudoku', { elapsedSeconds: 300 }, 'hard');
     await submitRanking(ken, 'sudoku', { elapsedSeconds: 200 }, 'hard');
     await submitRanking(mai, 'sudoku', { elapsedSeconds: 250 }, 'hard');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 90 }, 'easy');
     await submitRanking(ken, '2048', { score: 900 });
     await report(mai, ken.memberId);
 
-    const erased = await server.api('/api/v1/me/records', { method: 'DELETE', token: ken.token });
-    expect(erased.status).toBe(204);
+    expect((await deleteRanking(ken, 'sudoku', 'hard')).status).toBe(204);
 
-    expect(
-      (await server.api(`/api/v1/challenges/${id}`, { token: owner.token })).json.resultCount,
-    ).toBe(2);
-    const results = await server.api(`/api/v1/challenges/${id}/results`, { token: owner.token });
-    expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Mai', 'Yoh']);
     const tables = await server.api('/api/v1/rankings', { token: owner.token });
     expect(
-      tables.json.map((t: { gameId: string; entryCount: number; leader: { nickname: string } }) => [
-        t.gameId,
-        t.entryCount,
-        t.leader.nickname,
-      ]),
-    ).toEqual([['sudoku', 2, 'Mai']]);
-    const records = await server.api('/api/v1/records', { token: owner.token });
-    expect(
-      records.json.map((r: { gameId: string; nickname: string }) => [r.gameId, r.nickname]),
-    ).toEqual([['sudoku', 'Mai']]);
-    // Mai and Yoh are untouched, and the challenge Ken did not create is still there.
-    const table = await server.api('/api/v1/rankings/sudoku/hard', { token: mai.token });
+      tables.json.map(
+        (t: {
+          gameId: string;
+          paramsKey: string;
+          entryCount: number;
+          leader: { nickname: string };
+        }) => [t.gameId, t.paramsKey, t.entryCount, t.leader.nickname],
+      ),
+    ).toEqual([
+      ['2048', 'default', 1, 'Ken'],
+      ['sudoku', 'easy', 1, 'Ken'],
+      ['sudoku', 'hard', 2, 'Mai'],
+    ]);
+    const table = await server.api('/api/v1/rankings/sudoku/hard', { token: ken.token });
     expect(table.json.entries.map((e: { nickname: string }) => e.nickname)).toEqual(['Mai', 'Yoh']);
+    expect(table.json.me).toBeNull();
+    expect(table.json.entryCount).toBe(2);
 
-    // Still a member: the token works, the reports stay, and a later game is accepted again.
-    const club = await server.api('/api/v1/club', { token: ken.token });
-    expect(club.status).toBe(200);
-    expect(club.json.memberCount).toBe(3);
+    // Ken's results in challenges, his other tables, his membership and the reports stay.
+    expect(
+      (await server.api(`/api/v1/challenges/${id}`, { token: ken.token })).json.resultCount,
+    ).toBe(2);
     expect(
       (await server.api('/api/v1/members/reported', { token: owner.token })).json,
     ).toMatchObject([{ member: { id: ken.memberId }, reportCount: 1 }]);
-    expect((await submitRanking(ken, 'sudoku', { elapsedSeconds: 210 }, 'hard')).status).toBe(201);
-    expect((await sendChallengeResult(ken, id, 210)).status).toBe(201);
-    expect(
-      (await server.api(`/api/v1/challenges/${id}`, { token: owner.token })).json.resultCount,
-    ).toBe(3);
-    expect(
-      (await server.api('/api/v1/rankings', { token: owner.token })).json[0].leader.nickname,
-    ).toBe('Ken');
+    expect((await server.api('/api/v1/club', { token: ken.token })).status).toBe(200);
+
+    // A later finished game enters the table again, and takes the lead again.
+    const again = await submitRanking(ken, 'sudoku', { elapsedSeconds: 210 }, 'hard');
+    expect(again.status).toBe(201);
+    expect(again.json.entryCount).toBe(3);
+    const after = await server.api('/api/v1/rankings/sudoku/hard', { token: ken.token });
+    expect(after.json.entries.map((e: { nickname: string }) => e.nickname)).toEqual([
+      'Ken',
+      'Mai',
+      'Yoh',
+    ]);
+    expect(after.json.me.rank).toBe(1);
   });
 
-  it("keeps the challenges the caller created, with the others' results on them", async () => {
+  it('keeps the leader when a member behind them deletes, and works for an owner', async () => {
     const owner = await claimOwner(server, 'Yoh');
     const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
-    const challenge = await createChallenge(ken, 'seed-k', 200);
-    await sendChallengeResult(owner, challenge.json.id, 400);
-    await server.api('/api/v1/me/records', { method: 'DELETE', token: ken.token });
-    const after = await server.api(`/api/v1/challenges/${challenge.json.id}`, {
-      token: owner.token,
-    });
-    expect(after.status).toBe(200);
-    expect(after.json).toMatchObject({ resultCount: 1, createdBy: { id: ken.memberId } });
-    const results = await server.api(`/api/v1/challenges/${challenge.json.id}/results`, {
-      token: owner.token,
-    });
-    expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Yoh']);
-  });
-
-  it('works for an owner, is a 204 with nothing to erase, and needs a live member token', async () => {
-    const owner = await claimOwner(server, 'Yoh');
-    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
-    await submitRanking(owner, 'sudoku', { elapsedSeconds: 100 }, 'hard');
-    await submitRanking(ken, 'sudoku', { elapsedSeconds: 200 }, 'hard');
-    const del = (token?: string) => server.api('/api/v1/me/records', { method: 'DELETE', token });
-    expect((await del(owner.token)).status).toBe(204);
-    expect((await del(owner.token)).status).toBe(204);
-    const tables = await server.api('/api/v1/rankings', { token: ken.token });
-    expect(tables.json).toMatchObject([{ entryCount: 1, leader: { nickname: 'Ken' } }]);
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+    await submitRanking(owner, 'sudoku', { elapsedSeconds: 200 }, 'hard');
+    expect((await deleteRanking(owner, 'sudoku', 'hard')).status).toBe(204);
+    expect((await server.api('/api/v1/rankings', { token: ken.token })).json).toMatchObject([
+      { entryCount: 1, leader: { nickname: 'Ken' } },
+    ]);
     expect((await server.api('/api/v1/club', { token: owner.token })).json.me.role).toBe('owner');
-    expect((await del()).status).toBe(401);
-    await server.api(`/api/v1/members/${ken.memberId}`, { method: 'DELETE', token: owner.token });
-    expect((await del(ken.token)).status).toBe(401);
   });
-});
 
-describe('DELETE /api/v1/me/records, a higher-is-better table', () => {
-  it('gives the lead to the earliest of the entries tied at the next value', async () => {
+  it('gives the lead of a lower-is-better table to the earliest of the entries tied at the next value', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    const sam = await joinMember(server, owner, 'Sam', '203.0.113.3');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+    await submitRanking(sam, 'sudoku', { elapsedSeconds: 200 }, 'hard');
+    await submitRanking(mai, 'sudoku', { elapsedSeconds: 200 }, 'hard');
+    await submitRanking(owner, 'sudoku', { elapsedSeconds: 300 }, 'hard');
+    const leader = async () =>
+      (await server.api('/api/v1/rankings', { token: owner.token })).json[0];
+    expect(await leader()).toMatchObject({ entryCount: 4, leader: { nickname: 'Ken' } });
+    await deleteRanking(ken, 'sudoku', 'hard');
+    expect(await leader()).toMatchObject({ entryCount: 3, leader: { nickname: 'Sam' } });
+    await deleteRanking(sam, 'sudoku', 'hard');
+    expect(await leader()).toMatchObject({ entryCount: 2, leader: { nickname: 'Mai' } });
+  });
+
+  it('gives the lead of a higher-is-better table to the earliest of the entries tied at the next value', async () => {
     const owner = await claimOwner(server, 'Yoh');
     const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
     const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
@@ -594,16 +604,141 @@ describe('DELETE /api/v1/me/records, a higher-is-better table', () => {
     const leader = async () =>
       (await server.api('/api/v1/rankings', { token: owner.token })).json[0];
     expect(await leader()).toMatchObject({ entryCount: 4, leader: { nickname: 'Ken' } });
-
-    await server.api('/api/v1/me/records', { method: 'DELETE', token: ken.token });
+    await deleteRanking(ken, '2048', 'default');
     expect(await leader()).toMatchObject({ entryCount: 3, leader: { nickname: 'Sam' } });
     // A member who is not the leader goes without moving it.
-    await server.api('/api/v1/me/records', { method: 'DELETE', token: owner.token });
+    await deleteRanking(owner, '2048', 'default');
     expect(await leader()).toMatchObject({ entryCount: 2, leader: { nickname: 'Sam' } });
-    // Mai erases her tie, then Sam his lead: the table is gone.
-    await server.api('/api/v1/me/records', { method: 'DELETE', token: mai.token });
-    await server.api('/api/v1/me/records', { method: 'DELETE', token: sam.token });
+    await deleteRanking(sam, '2048', 'default');
+    expect(await leader()).toMatchObject({ entryCount: 1, leader: { nickname: 'Mai' } });
+  });
+
+  it("drops the table's summary row when the only entry goes", async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    await submitRanking(owner, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+    expect((await deleteRanking(owner, 'sudoku', 'hard')).status).toBe(204);
     expect((await server.api('/api/v1/rankings', { token: owner.token })).json).toEqual([]);
+    expect((await server.api('/api/v1/records', { token: owner.token })).json).toEqual([]);
+    const table = await server.api('/api/v1/rankings/sudoku/hard', { token: owner.token });
+    expect(table.json).toMatchObject({ entryCount: 0, entries: [], me: null });
+    // The table starts again with the next finished game.
+    expect((await submitRanking(owner, 'sudoku', { elapsedSeconds: 120 }, 'hard')).status).toBe(
+      201,
+    );
+    expect((await server.api('/api/v1/rankings', { token: owner.token })).json).toMatchObject([
+      { entryCount: 1, leader: { nickname: 'Yoh' } },
+    ]);
+  });
+
+  it('is a 404 when the caller has no row there, and leaves everyone else alone', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    await submitRanking(owner, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+    expect((await deleteRanking(ken, 'sudoku', 'hard')).status).toBe(404);
+    expect((await deleteRanking(ken, 'sudoku', 'nope')).status).toBe(404);
+    expect((await deleteRanking(ken, 'no-such-game', 'hard')).status).toBe(404);
+    expect((await deleteRanking(owner, 'sudoku', 'hard')).status).toBe(204);
+    expect((await deleteRanking(owner, 'sudoku', 'hard')).status).toBe(404);
+    expect((await server.api('/api/v1/rankings', { token: ken.token })).json).toEqual([]);
+  });
+
+  it('needs a live member token', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+    expect((await deleteRanking(undefined, 'sudoku', 'hard')).status).toBe(401);
+    await server.api(`/api/v1/members/${ken.memberId}`, { method: 'DELETE', token: owner.token });
+    expect((await deleteRanking(ken, 'sudoku', 'hard')).status).toBe(401);
+  });
+});
+
+describe('DELETE /api/v1/challenges/:id/results/me', () => {
+  it("deletes the caller's result, fixes the count, and refuses any later submission on both paths", async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    const challenge = await createChallenge(owner, 'seed-a', 300);
+    const id = challenge.json.id;
+    await sendChallengeResult(ken, id, 200);
+    await sendChallengeResult(mai, id, 250);
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 200 }, 'hard');
+    expect((await server.api(`/api/v1/challenges/${id}`, { token: ken.token })).json).toMatchObject(
+      { resultCount: 3, mine: true },
+    );
+
+    expect((await deleteResult(ken, id)).status).toBe(204);
+
+    const after = await server.api(`/api/v1/challenges/${id}`, { token: ken.token });
+    // Withdrawn still reads as `mine`: the app must not offer to send a result here again.
+    expect(after.json).toMatchObject({ resultCount: 2, mine: true });
+    const maiView = await server.api(`/api/v1/challenges/${id}`, { token: mai.token });
+    expect(maiView.json).toMatchObject({ mine: true });
+    const results = await server.api(`/api/v1/challenges/${id}/results`, { token: ken.token });
+    expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Mai', 'Yoh']);
+    // The others' results, Ken's ranking row, his membership and the challenge itself stay.
+    expect((await server.api('/api/v1/rankings', { token: ken.token })).json).toMatchObject([
+      { entryCount: 1, leader: { nickname: 'Ken' } },
+    ]);
+    expect((await server.api('/api/v1/club', { token: ken.token })).status).toBe(200);
+
+    // Deleting a result is leaving that challenge: both ways in answer 409, and store nothing.
+    const direct = await sendChallengeResult(ken, id, 150);
+    expect(direct.status).toBe(409);
+    expect(direct.json.error.code).toBe('already_submitted');
+    const viaCreate = await createChallenge(ken, 'seed-a', 150);
+    expect(viaCreate.status).toBe(409);
+    expect(viaCreate.json.error.code).toBe('already_submitted');
+    expect(
+      (await server.api(`/api/v1/challenges/${id}`, { token: owner.token })).json.resultCount,
+    ).toBe(2);
+    expect((await deleteResult(ken, id)).status).toBe(404);
+
+    // Others still send to it, and Ken can still play other challenges.
+    const sam = await joinMember(server, owner, 'Sam', '203.0.113.3');
+    expect((await sendChallengeResult(sam, id, 260)).status).toBe(201);
+    expect((await createChallenge(ken, 'seed-b', 150)).status).toBe(201);
+    expect(
+      (await server.api(`/api/v1/challenges/${id}`, { token: owner.token })).json.resultCount,
+    ).toBe(3);
+  });
+
+  it('lets the creator delete their own result and keeps the challenge for the others', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const challenge = await createChallenge(ken, 'seed-k', 200);
+    const id = challenge.json.id;
+    expect((await deleteResult(ken, id)).status).toBe(204);
+    const after = await server.api(`/api/v1/challenges/${id}`, { token: owner.token });
+    expect(after.status).toBe(200);
+    expect(after.json).toMatchObject({ resultCount: 0, createdBy: { id: ken.memberId } });
+    expect((await sendChallengeResult(ken, id, 100)).status).toBe(409);
+    expect((await sendChallengeResult(owner, id, 400)).status).toBe(201);
+    expect(
+      (await server.api(`/api/v1/challenges/${id}/results`, { token: owner.token })).json,
+    ).toHaveLength(1);
+  });
+
+  it('is a 404 with no result of the caller, an unknown challenge, or a deleted one', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const challenge = await createChallenge(owner, 'seed-a', 300);
+    const id = challenge.json.id;
+    expect((await deleteResult(ken, id)).status).toBe(404);
+    // A 404 leaves no mark: Ken may still send his result.
+    expect((await sendChallengeResult(ken, id, 200)).status).toBe(201);
+    expect((await deleteResult(ken, 'ch_nope')).status).toBe(404);
+    expect((await deleteResult(owner, id)).status).toBe(204);
+    await server.api(`/api/v1/challenges/${id}`, { method: 'DELETE', token: owner.token });
+    expect((await deleteResult(ken, id)).status).toBe(404);
+  });
+
+  it('needs a live member token', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const challenge = await createChallenge(ken, 'seed-k', 200);
+    expect((await deleteResult(undefined, challenge.json.id)).status).toBe(401);
+    await server.api(`/api/v1/members/${ken.memberId}`, { method: 'DELETE', token: owner.token });
+    expect((await deleteResult(ken, challenge.json.id)).status).toBe(401);
   });
 });
 
@@ -615,7 +750,7 @@ const rowsRead = (reply: { headers: Headers }): number | null => {
 };
 
 describe("a member's own levers read only their own rows (Workers)", () => {
-  it('reads the same rows for a rename and an erase however many results the others have', async () => {
+  it('reads the same rows for a rename and for deleting a record however many rows the others have', async () => {
     await server.reopen({
       openJoin: true,
       limits: { ipPerMinute: 100000, memberPerMinute: 100000 },
@@ -637,47 +772,49 @@ describe("a member's own levers read only their own rows (Workers)", () => {
     const challenge = await createChallenge(owner, 'seed-rows', 100);
     const id = challenge.json.id;
 
-    /** Mai's one result and one ranking row, then a rename and an erase, measured. */
-    const measure = async (nickname: string): Promise<[number | null, number | null]> => {
+    /**
+     * Mai's one result and one ranking row — the best of the table, so deleting it moves the
+     * lead — then a rename, a ranking delete and a result delete, measured.
+     */
+    const measure = async (nickname: string): Promise<(number | null)[]> => {
       const mai = await joinOpen(nickname);
       await sendChallengeResult(mai, id, 900);
-      await submitRanking(mai, 'sudoku', { elapsedSeconds: 900 }, 'hard');
+      await submitRanking(mai, 'sudoku', { elapsedSeconds: 100 }, 'hard');
+      await submitRanking(mai, '2048', { score: 1e9 });
       const renamed = await server.api('/api/v1/me', {
         method: 'PATCH',
         token: mai.token,
         body: { nickname: `${nickname} 2` },
       });
-      const erased = await server.api('/api/v1/me/records', { method: 'DELETE', token: mai.token });
+      const lowest = await deleteRanking(mai, 'sudoku', 'hard');
+      const highest = await deleteRanking(mai, '2048', 'default');
+      const result = await deleteResult(mai, id);
       expect(renamed.status).toBe(200);
-      expect(erased.status).toBe(204);
-      return [rowsRead(renamed), rowsRead(erased)];
+      expect(lowest.status).toBe(204);
+      expect(highest.status).toBe(204);
+      expect(result.status).toBe(204);
+      return [renamed, lowest, highest, result].map(rowsRead);
     };
 
-    for (let i = 0; i < 3; i++) {
-      const other = await joinOpen(`A${i}`);
-      await sendChallengeResult(other, id, 200 + i);
-      await submitRanking(other, 'sudoku', { elapsedSeconds: 200 + i }, 'hard');
-    }
-    const [renameSmall, eraseSmall] = await measure('MaiA');
-    for (let i = 3; i < 40; i++) {
-      const other = await joinOpen(`A${i}`);
-      await sendChallengeResult(other, id, 200 + i);
-      await submitRanking(other, 'sudoku', { elapsedSeconds: 200 + i }, 'hard');
-      await submitRanking(other, 'sudoku', { elapsedSeconds: 300 + i }, `m${i}`);
-    }
-    const [renameLarge, eraseLarge] = await measure('MaiB');
-    if (
-      renameSmall === null ||
-      eraseSmall === null ||
-      renameLarge === null ||
-      eraseLarge === null
-    ) {
-      return; // Node reports no rows
-    }
-    // The caller's rows are found by their own index: the others' results cost nothing.
-    expect(renameLarge).toBeLessThanOrEqual(renameSmall + 6);
-    expect(eraseLarge).toBeLessThanOrEqual(eraseSmall + 6);
-    expect(renameLarge).toBeLessThan(40);
-    expect(eraseLarge).toBeLessThan(60);
+    const fill = async (from: number, to: number): Promise<void> => {
+      for (let i = from; i < to; i++) {
+        const other = await joinOpen(`A${i}`);
+        await sendChallengeResult(other, id, 200 + i);
+        await submitRanking(other, 'sudoku', { elapsedSeconds: 200 + i }, 'hard');
+        await submitRanking(other, '2048', { score: 1000 + i });
+        // Ties at the cut: every other member has the same value in one more table.
+        await submitRanking(other, '2048', { score: 5 }, `tie-${i % 2}`);
+      }
+    };
+    await fill(0, 3);
+    const small = await measure('MaiA');
+    await fill(3, 40);
+    const large = await measure('MaiB');
+    if (small.includes(null) || large.includes(null)) return; // Node reports no rows
+    // The caller's rows are found by their own key or index: the others' rows cost nothing.
+    small.forEach((rows, i) => {
+      expect(large[i]!).toBeLessThanOrEqual(rows! + 6);
+      expect(large[i]!).toBeLessThan(20);
+    });
   });
 });

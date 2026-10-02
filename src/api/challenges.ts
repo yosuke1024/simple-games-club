@@ -43,7 +43,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     // keeps the first sender's title and daily tag.
     const existing = store.liveChallengeOnBoard(gameId, seed, boardDigest, member.id);
     if (existing !== null) {
-      if (store.hasResult(existing.id, member.id)) {
+      if (store.alreadySubmitted(existing.id, member.id)) {
         throw conflict('already_submitted', 'one result per member per challenge');
       }
       store.addResult({
@@ -145,7 +145,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
           'the board this device generated is not the board of the challenge',
         );
       }
-      if (store.hasResult(challenge.id, member.id)) {
+      if (store.alreadySubmitted(challenge.id, member.id)) {
         throw conflict('already_submitted', 'one result per member per challenge');
       }
 
@@ -161,6 +161,20 @@ export function registerChallenges(router: Router, deps: Deps): void {
       });
       store.touchActivity(now);
       return { status: 201, body: resultShape(result) };
+    },
+  );
+  // The caller leaves this challenge: their result is deleted and they cannot send another
+  // (the same 409 `already_submitted` on both ways in). Their own row only.
+  router.add(
+    'DELETE',
+    '/api/v1/challenges/:id/results/me',
+    { auth: 'member', limit: 'member' },
+    (ctx) => {
+      const member = ctx.member!;
+      const challenge = store.challengeById(ctx.params.id!, member.id);
+      if (challenge === null) throw notFound('no such challenge');
+      if (!store.withdrawResult(challenge.id, member.id)) throw notFound('no result of yours');
+      return { status: 204 };
     },
   );
 }

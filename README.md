@@ -168,11 +168,13 @@ POST   /api/v1/challenges                    member        challenge + the creat
 GET    /api/v1/challenges/:id                member        Challenge
 DELETE /api/v1/challenges/:id                creator/owner 204
 GET    /api/v1/challenges/:id/results        member        Result[]  (best first by the game's axis, the best 200 (`resultsPage`) and the asker's own row after them when it ranks lower — see below)
-POST   /api/v1/challenges/:id/results        member        one per member → Result
+POST   /api/v1/challenges/:id/results        member        one per member → Result (409 `already_submitted` when they already sent one, or deleted theirs)
+DELETE /api/v1/challenges/:id/results/me     member        204; deletes the caller's own result (resultCount follows) and leaves a mark: they cannot send another to this challenge, on this route or by posting the same board to `POST /challenges` (409 `already_submitted`). 404 when they have no result there or the challenge is deleted. Their ranking rows, the challenge and the others' results stay
 GET    /api/v1/records                       member        the rankings' leaders in the old shape ({ gameId, paramsKey, facts, memberId, nickname, challengeId: '' }[])
 POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts } → { gameId, paramsKey, improved, entry, entryCount } (201 when the member's row was inserted or replaced, else 200)
 GET    /api/v1/rankings                      member        [{ gameId, paramsKey, entryCount, leader }] — one per table
 GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry } | null } (top 50, at most 100; `me.rank` is `null` when the viewer is below the `rankingRankScan` ceiling, 1000 better rows, so the count stays bounded)
+DELETE /api/v1/rankings/:gameId/:paramsKey/me  member     204; deletes the caller's own row in that table (the table's count and leader follow; its summary row goes when it empties). 404 when they have no row there. The next finished game enters the table again as usual
 GET    /api/v1/hosting                       member        { provider, manageUrl (owners), referralUrl, lastActivityAt }
 PATCH  /api/v1/hosting                       owner         { referralUrl | null }
 GET    /api/v1/invite                        owner         { token, url }
@@ -180,7 +182,6 @@ POST   /api/v1/invite                        owner         { role: 'member' } ro
 DELETE /api/v1/members/:id[?purge=1]         owner         204; never the last owner. purge=1 also deletes their results (challenge resultCount follows), ranking rows (table count and leader follow) and reports; without it their results stay under their name
 PATCH  /api/v1/members/:id                   owner         { nickname } → Member; renames their results and ranking rows too and clears the reports against them
 PATCH  /api/v1/me                            member        { nickname } → Member; renames the caller and the name on their results and ranking rows (same nickname rules as join). The reports against them stay (the owner's rename clears them; this does not)
-DELETE /api/v1/me/records                    member        204; deletes the caller's own results (challenge resultCount follows) and ranking rows (table count and leader follow). They stay a member with the same token, the reports against them stay, and the challenges they created stay (others' results hang off them); owners can use it too
 POST   /api/v1/members/:id/report            member        204; one report per reporter, a second changes nothing; 400 on yourself, 404 on an unknown or removed member
 GET    /api/v1/members/reported              owner         [{ member, reportCount }] — most reported first, then the oldest member
 GET    /api/v1/public[?date=YYYY-MM-DD]      no auth       { club: { name }, memberCount, today: [{ gameId, daily, resultCount, top: [{ nickname, facts }] }], rankings: [{ gameId, paramsKey, entryCount, leader: { nickname, facts }, top: [{ nickname, facts }] }] } — rankings: the 8 most-entered tables, `top` their best 3; 404 unless CLUB_OPEN_JOIN; Cache-Control: public, max-age=300 (the Worker caches it 5 minutes)
