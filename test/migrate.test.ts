@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { migrate, type SqlDriver } from '../src/db/driver.js';
+import { migrate, upgradeToV3, type SqlDriver } from '../src/db/driver.js';
 
 // The schema as v1 shipped it, copied here: the upgrade must work on exactly this.
 const V1_SCHEMA = `
@@ -118,6 +118,63 @@ describe('migrate() from schema 1', () => {
     expect(
       d.get(`SELECT name FROM sqlite_master WHERE name = 'ranking_entries_table'`),
     ).toBeDefined();
+  });
+
+  it('upgradeToV3 adds seq, backfills it, and builds ranking_tables from existing rows', () => {
+    dir = mkdtempSync(join(tmpdir(), 'sg-club-migrate-'));
+    db = new DatabaseSync(join(dir, 'club.sqlite'));
+    const d: SqlDriver = {
+      exec: (script) => db.exec(script),
+      run: (sql, ...params) => {
+        db.prepare(sql).run(...params);
+      },
+      get: (sql, ...params) => db.prepare(sql).get(...params),
+      all: (sql, ...params) => db.prepare(sql).all(...params),
+    };
+    d.exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    d.exec(`CREATE TABLE ranking_entries (
+      game_id TEXT NOT NULL, params_key TEXT NOT NULL, member_id TEXT NOT NULL,
+      nickname TEXT NOT NULL, value REAL NOT NULL, facts_json TEXT NOT NULL, seed TEXT NOT NULL,
+      board_digest TEXT, submitted_at TEXT NOT NULL, PRIMARY KEY (game_id, params_key, member_id)
+    )`);
+    d.exec(`CREATE TABLE ranking_tables (
+      game_id TEXT NOT NULL, params_key TEXT NOT NULL, entry_count INTEGER NOT NULL,
+      leader_member_id TEXT NOT NULL, PRIMARY KEY (game_id, params_key)
+    )`);
+    d.run(`INSERT INTO meta VALUES ('schema_version', '3')`);
+    const put = (game: string, member: string, value: number) =>
+      d.run(
+        `INSERT INTO ranking_entries VALUES (?, 'k', ?, ?, ?, '{}', '', NULL, 't')`,
+        game,
+        member,
+        member,
+        value,
+      );
+    put('sudoku', 'a', 300); // asc: lower leads, ties keep the earlier row
+    put('sudoku', 'b', 200);
+    put('sudoku', 'c', 200);
+    put('2048', 'a', 10); // desc: higher leads
+    put('2048', 'b', 90);
+    put('2048', 'c', 50);
+    put('hearts', 'a', 5);
+
+    upgradeToV3(d);
+    upgradeToV3(d); // idempotent
+
+    expect(d.get(`SELECT MIN(seq) AS lo, MAX(seq) AS hi FROM ranking_entries`)).toEqual({
+      lo: 1,
+      hi: 7,
+    });
+    expect(d.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`)?.value).toBe('7');
+    expect(
+      d.all(
+        `SELECT game_id, entry_count, leader_member_id FROM ranking_tables ORDER BY game_id`,
+      ),
+    ).toEqual([
+      { game_id: '2048', entry_count: 3, leader_member_id: 'b' },
+      { game_id: 'hearts', entry_count: 1, leader_member_id: 'a' },
+      { game_id: 'sudoku', entry_count: 3, leader_member_id: 'b' },
+    ]);
   });
 
   it('refuses a database newer than this server', () => {

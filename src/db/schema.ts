@@ -22,7 +22,11 @@ export const SCHEMA_VERSION = 3;
  * v3 (rankings, club.md §16): `ranking_entries` — one row per member per
  * game × mode, their personal best — replaces the v2 `records` table, which
  * was a cache of challenge results and is dropped; records are now the
- * rankings' leaders.
+ * rankings' leaders. `ranking_entries.seq` is a counter bumped on every write
+ * (meta `ranking_seq`) — arrival order, which breaks ties between equal values.
+ * `ranking_tables` is one summary row per table (entry count and leader),
+ * kept by `offerRanking`, so a list read costs the number of tables, not of
+ * entries (docs/cloudflare.md §4).
  */
 
 export const SCHEMA_SQL = `
@@ -105,9 +109,24 @@ CREATE TABLE IF NOT EXISTS ranking_entries (
   seed TEXT NOT NULL,
   board_digest TEXT,
   submitted_at TEXT NOT NULL,
+  seq INTEGER NOT NULL,
   PRIMARY KEY (game_id, params_key, member_id)
 );
 
+CREATE TABLE IF NOT EXISTS ranking_tables (
+  game_id TEXT NOT NULL,
+  params_key TEXT NOT NULL,
+  entry_count INTEGER NOT NULL,
+  leader_member_id TEXT NOT NULL,
+  PRIMARY KEY (game_id, params_key)
+);
+`;
+
+/**
+ * Run by `migrate()` after the tables exist and any upgrade has run, so it
+ * never meets a `ranking_entries` that still lacks `seq`.
+ */
+export const RANKING_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS ranking_entries_table
-  ON ranking_entries (game_id, params_key, value, submitted_at);
+  ON ranking_entries (game_id, params_key, value, seq);
 `;

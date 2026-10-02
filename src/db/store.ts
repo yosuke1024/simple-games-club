@@ -89,12 +89,9 @@ export interface RankingTableRow {
 }
 
 const directionOf = (gameId: string): Direction => GAME_CONTRACTS[gameId]?.direction ?? 'asc';
-/** `ORDER BY` for a table, best first; ties by earlier submission, then member id. */
+/** `ORDER BY` for a table, best first; ties by arrival (`seq`), earlier first. */
 const orderBy = (direction: Direction): string =>
-  `value ${direction === 'asc' ? 'ASC' : 'DESC'}, submitted_at, member_id`;
-const DESC_GAMES = Object.keys(GAME_CONTRACTS).filter(
-  (id) => GAME_CONTRACTS[id]!.direction === 'desc',
-);
+  `value ${direction === 'asc' ? 'ASC' : 'DESC'}, seq`;
 
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
@@ -490,7 +487,9 @@ export class Store {
   /**
    * Stores a completed result as the member's row when the table has none of
    * theirs or this one is STRICTLY better (an equal value keeps the earlier
-   * row). Returns whether the table changed.
+   * row). Every write takes the next `seq`, so equal values order by arrival.
+   * Keeps the table's summary row (count, leader) in step in O(1). Returns
+   * whether the table changed.
    */
   offerRanking(input: {
     gameId: string;
@@ -503,26 +502,33 @@ export class Store {
     boardDigest: string | null;
     now: string;
   }): boolean {
+    const asc = directionOf(input.gameId) === 'asc';
+    const isBetter = (value: number, than: number): boolean => (asc ? value < than : value > than);
     const existing = this.db.get(
       `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
       input.gameId,
       input.paramsKey,
       input.memberId,
     );
-    if (existing !== undefined) {
-      const before = Number(existing.value);
-      const better =
-        directionOf(input.gameId) === 'asc' ? input.value < before : input.value > before;
-      if (!better) return false;
-    }
+    if (existing !== undefined && !isBetter(input.value, Number(existing.value))) return false;
+
+    // One writer per deployment, so read-increment-write needs no lock.
+    const counter = this.db.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`);
+    const seq = (counter === undefined ? 0 : Number(counter.value)) + 1;
+    this.db.run(
+      `INSERT INTO meta (key, value) VALUES ('ranking_seq', ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      String(seq),
+    );
     this.db.run(
       `INSERT INTO ranking_entries
-         (game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest, submitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest,
+          submitted_at, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (game_id, params_key, member_id) DO UPDATE SET
          nickname = excluded.nickname, value = excluded.value, facts_json = excluded.facts_json,
          seed = excluded.seed, board_digest = excluded.board_digest,
-         submitted_at = excluded.submitted_at`,
+         submitted_at = excluded.submitted_at, seq = excluded.seq`,
       input.gameId,
       input.paramsKey,
       input.memberId,
@@ -532,23 +538,67 @@ export class Store {
       input.seed,
       input.boardDigest,
       input.now,
+      seq,
+    );
+
+    const summary = this.db.get(
+      `SELECT leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+      input.gameId,
+      input.paramsKey,
+    );
+    if (summary === undefined) {
+      this.db.run(
+        `INSERT INTO ranking_tables (game_id, params_key, entry_count, leader_member_id)
+         VALUES (?, ?, 1, ?)`,
+        input.gameId,
+        input.paramsKey,
+        input.memberId,
+      );
+      return true;
+    }
+    const leaderId = text(summary, 'leader_member_id');
+    let takesLead = leaderId === input.memberId;
+    if (!takesLead) {
+      const leader = this.db.get(
+        `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+        input.gameId,
+        input.paramsKey,
+        leaderId,
+      );
+      // Strictly better only: an equal value stays behind the earlier leader.
+      takesLead = leader === undefined || isBetter(input.value, Number(leader.value));
+    }
+    this.db.run(
+      `UPDATE ranking_tables
+       SET entry_count = entry_count + ?, leader_member_id = ?
+       WHERE game_id = ? AND params_key = ?`,
+      existing === undefined ? 1 : 0,
+      takesLead ? input.memberId : leaderId,
+      input.gameId,
+      input.paramsKey,
     );
     return true;
   }
 
+  /** The table's row count, from its summary row. */
   rankingCount(gameId: string, paramsKey: string): number {
     const row = this.db.get(
-      `SELECT COUNT(*) AS n FROM ranking_entries WHERE game_id = ? AND params_key = ?`,
+      `SELECT entry_count FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
       gameId,
       paramsKey,
     );
-    return row === undefined ? 0 : int(row, 'n');
+    return row === undefined ? 0 : int(row, 'entry_count');
   }
 
-  /** 1 + the rows that are better, or equal and earlier — the order `rankingTop` lists in. */
-  rankOf(gameId: string, paramsKey: string, memberId: string): number | null {
+  /**
+   * 1 + the rows that are better, or equal and earlier (lower `seq`) — the
+   * order `rankingTop` lists in. Counts through the index and stops at
+   * `scanLimit` better rows: past that the rank is unknown and this returns
+   * `null`, as it does for a member with no row (limits.rankingRankScan).
+   */
+  rankOf(gameId: string, paramsKey: string, memberId: string, scanLimit: number): number | null {
     const mine = this.db.get(
-      `SELECT value, submitted_at FROM ranking_entries
+      `SELECT value, seq FROM ranking_entries
        WHERE game_id = ? AND params_key = ? AND member_id = ?`,
       gameId,
       paramsKey,
@@ -557,18 +607,19 @@ export class Store {
     if (mine === undefined) return null;
     const better = directionOf(gameId) === 'asc' ? '<' : '>';
     const row = this.db.get(
-      `SELECT COUNT(*) AS n FROM ranking_entries
-       WHERE game_id = ? AND params_key = ? AND (value ${better} ?
-         OR (value = ? AND (submitted_at < ? OR (submitted_at = ? AND member_id < ?))))`,
+      `SELECT COUNT(*) AS n FROM (
+         SELECT 1 FROM ranking_entries
+         WHERE game_id = ? AND params_key = ? AND (value ${better} ? OR (value = ? AND seq < ?))
+         LIMIT ?)`,
       gameId,
       paramsKey,
       Number(mine.value),
       Number(mine.value),
-      text(mine, 'submitted_at'),
-      text(mine, 'submitted_at'),
-      memberId,
+      Number(mine.seq),
+      scanLimit,
     );
-    return (row === undefined ? 0 : int(row, 'n')) + 1;
+    const n = row === undefined ? 0 : int(row, 'n');
+    return n >= scanLimit ? null : n + 1;
   }
 
   /** The best `limit` rows of a table, in rank order. */
@@ -585,28 +636,22 @@ export class Store {
   }
 
   /**
-   * One row per table with its leader, picked by SQL: a window function ranks
-   * rows inside each table, so no table is read into application code. A
-   * `desc` game's value is negated for the ordering only.
+   * One row per table with its leader: the summary table joined to the
+   * leader's row by primary key, so the cost is the number of tables.
    */
   rankingTables(): RankingTableRow[] {
-    const marks = DESC_GAMES.map(() => '?').join(', ');
-    const signed = `(CASE WHEN game_id IN (${marks}) THEN -value ELSE value END)`;
     return this.db
       .all(
-        `SELECT * FROM (
-           SELECT *,
-             ROW_NUMBER() OVER (PARTITION BY game_id, params_key
-               ORDER BY ${signed}, submitted_at, member_id) AS rn,
-             COUNT(*) OVER (PARTITION BY game_id, params_key) AS n
-           FROM ranking_entries
-         ) WHERE rn = 1 ORDER BY game_id, params_key`,
-        ...DESC_GAMES,
+        `SELECT e.*, t.entry_count FROM ranking_tables t
+         JOIN ranking_entries e
+           ON e.game_id = t.game_id AND e.params_key = t.params_key
+          AND e.member_id = t.leader_member_id
+         ORDER BY t.game_id, t.params_key`,
       )
       .map((row) => ({
         gameId: text(row, 'game_id'),
         paramsKey: text(row, 'params_key'),
-        entryCount: int(row, 'n'),
+        entryCount: int(row, 'entry_count'),
         leader: toRankingEntry(row),
       }));
   }

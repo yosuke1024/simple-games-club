@@ -162,9 +162,9 @@ DELETE /api/v1/challenges/:id                creator/owner 204
 GET    /api/v1/challenges/:id/results        member        Result[]  (submission order, 200)
 POST   /api/v1/challenges/:id/results        member        one per member → Result
 GET    /api/v1/records                       member        the rankings' leaders in the old shape ({ gameId, paramsKey, facts, memberId, nickname, challengeId: '' }[])
-POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts } → { gameId, paramsKey, improved, rank, entry, entryCount } (201 when the member's row was inserted or replaced, else 200)
+POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts } → { gameId, paramsKey, improved, entry, entryCount } (201 when the member's row was inserted or replaced, else 200)
 GET    /api/v1/rankings                      member        [{ gameId, paramsKey, entryCount, leader }] — one per table
-GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry } | null } (top 50, at most 100)
+GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry } | null } (top 50, at most 100; `me.rank` is `null` when the viewer is below the `rankingRankScan` ceiling, 1000 better rows, so the count stays bounded)
 GET    /api/v1/hosting                       member        { provider, manageUrl (owners), referralUrl, lastActivityAt }
 PATCH  /api/v1/hosting                       owner         { referralUrl | null }
 GET    /api/v1/invite                        owner         { token, url }
@@ -193,7 +193,7 @@ Points the implementation settles within the contract:
   by a strictly better completed result — and records are those tables' leaders.
 - Limits: 5 owners and 100 members per club, 10 join/claim attempts per IP per
   minute, 60 requests per member per minute, 16KB per request, 1KB per
-  `params` and per `facts`, rankings top 50 (at most 100).
+  `params` and per `facts`, rankings top 50 (at most 100), rank scan ceiling `rankingRankScan` 1000.
 
 ## What is stored, what is logged
 

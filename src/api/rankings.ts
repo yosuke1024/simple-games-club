@@ -62,7 +62,6 @@ export function registerRankings(router: Router, deps: Deps): void {
           gameId,
           paramsKey,
           improved: changed,
-          rank: entry === null ? null : store.rankOf(gameId, paramsKey, member.id),
           entry: entry === null ? null : rankingEntryShape(entry),
           entryCount: store.rankingCount(gameId, paramsKey),
         },
@@ -100,7 +99,7 @@ export function registerRankings(router: Router, deps: Deps): void {
             mine === null
               ? null
               : {
-                  rank: store.rankOf(gameId, paramsKey, ctx.member!.id),
+                  rank: store.rankOf(gameId, paramsKey, ctx.member!.id, limits.rankingRankScan),
                   entry: rankingEntryShape(mine),
                 },
         },
