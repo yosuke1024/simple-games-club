@@ -11,7 +11,7 @@
  * except the member invite token, which the owner has to be able to read
  * back and hand out again (club.md §5-1), so it is stored as issued.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /*
  * v2 (the Public deployment, club.md §5-4): `challenges.daily` tags a board as
@@ -33,6 +33,18 @@ export const SCHEMA_VERSION = 4;
  * running total kept on `members.report_count` (so the owner's list reads a
  * page, not the table) — and an index on `challenges.daily` for the LP's
  * read-only view (§18).
+ *
+ * v5 (auto-sync, club.md §10): `results.rank_class` / `results.rank_key` keep where a result
+ * sorts (src/contracts/games.ts `resultRank`), so a challenge's best-N read and the
+ * daily's top three walk an index instead of every result of the day; and an index on
+ * `ranking_tables (entry_count DESC, …)` so the landing page's most-played tables are the
+ * first eight rows of a read, not a scan of every table.
+ *
+ * Also v5, same unreleased step (no version of its own): `withdrawn_results` — one row per
+ * (challenge, member) who deleted their own result from that challenge. It is what keeps
+ * "one result per member per challenge" true after the delete: a later submission by that
+ * member is refused (409 `already_submitted`), so deleting a day's result means leaving that
+ * day's challenge. `CREATE TABLE IF NOT EXISTS`, so an existing v5 database gains it on start.
  */
 
 export const SCHEMA_SQL = `
@@ -103,7 +115,15 @@ CREATE TABLE IF NOT EXISTS results (
   submitted_at TEXT NOT NULL,
   outcome TEXT NOT NULL CHECK (outcome IN ('completed', 'played')),
   facts_json TEXT NOT NULL,
+  rank_class INTEGER NOT NULL DEFAULT 2,
+  rank_key REAL,
   UNIQUE (challenge_id, member_id)
+);
+
+CREATE TABLE IF NOT EXISTS withdrawn_results (
+  challenge_id TEXT NOT NULL,
+  member_id TEXT NOT NULL,
+  PRIMARY KEY (challenge_id, member_id)
 );
 
 CREATE TABLE IF NOT EXISTS ranking_entries (
@@ -153,4 +173,31 @@ CREATE INDEX IF NOT EXISTS challenges_daily ON challenges (daily);
 /** Run by `migrate()` once `members.report_count` is certain to exist (after upgradeToV4). */
 export const REPORTED_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS members_reported ON members (report_count DESC, seq);
+`;
+
+/**
+ * Run by `migrate()` once `results.rank_class` and `rank_key` are certain to exist (after
+ * upgradeToV5). `seq` is the table's rowid, so it is the index's last term without being
+ * named: `ORDER BY rank_class, rank_key, seq` is read straight off the index.
+ */
+export const RESULT_RANK_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS results_rank ON results (challenge_id, rank_class, rank_key);
+`;
+
+/** The tables' summary rows, most-entered first — the landing page's eight (club.md §18). */
+export const RANKING_POPULAR_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS ranking_tables_popular
+  ON ranking_tables (entry_count DESC, game_id, params_key);
+`;
+
+/**
+ * A member's own rows. Neither table's key leads with `member_id` (results: `challenge_id`;
+ * ranking_entries: `game_id, params_key`), so without these a member's rename (`PATCH /me`) or
+ * the owner's removal with the work reads every row of both tables. Like the other indexes
+ * they are created idempotently on every start, so no schema version is needed; the price is
+ * one more index row written per result and per new ranking entry (docs/cloudflare.md §5).
+ */
+export const MEMBER_ROWS_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS results_member ON results (member_id);
+CREATE INDEX IF NOT EXISTS ranking_entries_member ON ranking_entries (member_id);
 `;

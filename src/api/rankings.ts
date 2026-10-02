@@ -5,10 +5,10 @@
  * better (src/contracts/games.ts). Nothing here is bound to a challenge.
  */
 import { API_VERSION } from '../limits.js';
-import { invalidRequest, unsupportedVersion } from '../http/errors.js';
+import { invalidRequest, notFound, unsupportedVersion } from '../http/errors.js';
 import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
-import { axisValue, GAME_CONTRACTS } from '../contracts/games.js';
+import { axisValue, contractOf } from '../contracts/games.js';
 import { iso, type Deps } from './deps.js';
 import { rankingEntryShape } from './shape.js';
 
@@ -31,7 +31,7 @@ export function registerRankings(router: Router, deps: Deps): void {
       const boardDigest = v.boardDigestOrNull(body.boardDigest);
       const outcome = v.outcome(body.outcome);
       const facts = v.smallObject(body.facts, 'facts', limits.smallJsonBytes);
-      const contract = GAME_CONTRACTS[gameId];
+      const contract = contractOf(gameId);
       if (contract === undefined) throw invalidRequest('no ranking for this game');
 
       let changed = false;
@@ -104,6 +104,19 @@ export function registerRankings(router: Router, deps: Deps): void {
                 },
         },
       };
+    },
+  );
+  // The caller's own row in one table. The next finished game enters the table again.
+  router.add(
+    'DELETE',
+    '/api/v1/rankings/:gameId/:paramsKey/me',
+    { auth: 'member', limit: 'member' },
+    (ctx) => {
+      const { gameId, paramsKey } = ctx.params as { gameId: string; paramsKey: string };
+      if (!store.removeRankingEntry(gameId, paramsKey, ctx.member!.id)) {
+        throw notFound('no record of yours in this ranking');
+      }
+      return { status: 204 };
     },
   );
 }

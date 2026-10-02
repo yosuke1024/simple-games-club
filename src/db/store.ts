@@ -1,7 +1,7 @@
 /**
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
-import { GAME_CONTRACTS, type Direction } from '../contracts/games.js';
+import { contractOf, resultRank, type Direction } from '../contracts/games.js';
 import type { Row, SqlDriver } from './driver.js';
 
 export type Role = 'owner' | 'member';
@@ -107,11 +107,7 @@ export interface RankingTableRow {
   leader: RankingEntryRow;
 }
 
-const directionOf = (gameId: string): Direction => GAME_CONTRACTS[gameId]?.direction ?? 'asc';
-/** `ORDER BY` for a table, best first; ties by arrival (`seq`), earlier first. */
-const orderBy = (direction: Direction): string =>
-  `value ${direction === 'asc' ? 'ASC' : 'DESC'}, seq`;
-
+const directionOf = (gameId: string): Direction => contractOf(gameId)?.direction ?? 'asc';
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
   const value = row[key];
@@ -186,9 +182,16 @@ const toResult = (row: Row): ResultRow => ({
   facts: parseJson(text(row, 'facts_json')),
 });
 
+// `mine`: the viewer has a result here, or withdrew one (DELETE …/results/me) and so can
+// send nothing more to this challenge — either way the challenge is no longer theirs to play
+// for a result. One bound parameter, read twice through the derived row.
 const CHALLENGE_SELECT = `
   SELECT c.*, m.nickname AS creator_nickname,
-    EXISTS (SELECT 1 FROM results r WHERE r.challenge_id = c.id AND r.member_id = ?) AS mine
+    EXISTS (
+      SELECT 1 FROM (SELECT ? AS viewer) me
+      WHERE EXISTS (SELECT 1 FROM results r WHERE r.challenge_id = c.id AND r.member_id = me.viewer)
+         OR EXISTS (SELECT 1 FROM withdrawn_results w WHERE w.challenge_id = c.id AND w.member_id = me.viewer)
+    ) AS mine
   FROM challenges c
   JOIN members m ON m.id = c.created_by
   WHERE c.deleted_at IS NULL`;
@@ -289,10 +292,23 @@ export class Store {
    * the remedy has been applied.
    */
   renameMember(id: string, nickname: string): void {
+    this.setNickname(id, nickname);
+    this.clearReports(id);
+  }
+
+  /**
+   * A member renaming themselves (club.md §5-3 `PATCH /me`): the same name
+   * change, but the reports against them stay — otherwise a reported member
+   * could reset the count by renaming.
+   */
+  renameSelf(id: string, nickname: string): void {
+    this.setNickname(id, nickname);
+  }
+
+  private setNickname(id: string, nickname: string): void {
     this.db.run(`UPDATE members SET nickname = ? WHERE id = ?`, nickname, id);
     this.db.run(`UPDATE results SET nickname = ? WHERE member_id = ?`, nickname, id);
     this.db.run(`UPDATE ranking_entries SET nickname = ? WHERE member_id = ?`, nickname, id);
-    this.clearReports(id);
   }
 
   /**
@@ -308,59 +324,91 @@ export class Store {
       id,
     );
     this.db.run(`DELETE FROM results WHERE member_id = ?`, id);
-
     const tables = this.db.all(
       `SELECT game_id, params_key FROM ranking_entries WHERE member_id = ?`,
       id,
     );
-    this.db.run(`DELETE FROM ranking_entries WHERE member_id = ?`, id);
     for (const table of tables) {
-      const gameId = text(table, 'game_id');
-      const paramsKey = text(table, 'params_key');
-      const summary = this.db.get(
-        `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-        gameId,
-        paramsKey,
-      );
-      if (summary === undefined) continue;
-      const count = int(summary, 'entry_count') - 1;
-      if (count <= 0) {
-        this.db.run(
-          `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-          gameId,
-          paramsKey,
-        );
-        continue;
-      }
-      let leader = text(summary, 'leader_member_id');
-      if (leader === id) {
-        const next = this.db.get(
-          `SELECT member_id FROM ranking_entries WHERE game_id = ? AND params_key = ?
-           ORDER BY ${orderBy(directionOf(gameId))} LIMIT 1`,
-          gameId,
-          paramsKey,
-        );
-        // Out of step with the entries (cannot happen): the table is empty after all.
-        if (next === undefined) {
-          this.db.run(
-            `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
-            gameId,
-            paramsKey,
-          );
-          continue;
-        }
-        leader = text(next, 'member_id');
-      }
-      this.db.run(
-        `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
-         WHERE game_id = ? AND params_key = ?`,
-        count,
-        leader,
-        gameId,
-        paramsKey,
-      );
+      this.dropRankingEntry(text(table, 'game_id'), text(table, 'params_key'), id);
     }
     this.clearReports(id);
+  }
+
+  /**
+   * A member deleting their own row in one ranking table (club.md §5-3
+   * `DELETE /rankings/:gameId/:paramsKey/me`). Returns false when they have none.
+   * A later finished game enters the table again as usual. Reads by primary key.
+   */
+  removeRankingEntry(gameId: string, paramsKey: string, memberId: string): boolean {
+    if (this.rankingEntry(gameId, paramsKey, memberId) === null) return false;
+    this.dropRankingEntry(gameId, paramsKey, memberId);
+    return true;
+  }
+
+  /**
+   * Deletes the member's row of a table that has one and keeps the table's summary row
+   * (count, leader) in step: the table's row goes when it empties, and when the leader
+   * leaves, the next leader is the best remaining value, the earliest on a tie. Both reads
+   * walk `ranking_entries_table`, so they read one row each however large the table is.
+   */
+  private dropRankingEntry(gameId: string, paramsKey: string, memberId: string): void {
+    this.db.run(
+      `DELETE FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+      gameId,
+      paramsKey,
+      memberId,
+    );
+    const summary = this.db.get(
+      `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+      gameId,
+      paramsKey,
+    );
+    if (summary === undefined) return;
+    const dropTable = (): void =>
+      this.db.run(
+        `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+        gameId,
+        paramsKey,
+      );
+    const count = int(summary, 'entry_count') - 1;
+    if (count <= 0) {
+      dropTable();
+      return;
+    }
+    let leader = text(summary, 'leader_member_id');
+    if (leader === memberId) {
+      const best = this.db.get(
+        `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ?
+         ORDER BY value ${directionOf(gameId) === 'asc' ? 'ASC' : 'DESC'} LIMIT 1`,
+        gameId,
+        paramsKey,
+      );
+      const next =
+        best === undefined
+          ? undefined
+          : this.db.get(
+              `SELECT member_id FROM ranking_entries
+               WHERE game_id = ? AND params_key = ? AND value = ? ORDER BY seq LIMIT 1`,
+              gameId,
+              paramsKey,
+              Number(best.value),
+            );
+      // Out of step with the entries (cannot happen): the table is empty after all.
+      if (next === undefined) {
+        dropTable();
+        return;
+      }
+      leader = text(next, 'member_id');
+    }
+    // The count changed, so `ranking_tables_popular` is rewritten anyway.
+    this.db.run(
+      `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
+       WHERE game_id = ? AND params_key = ?`,
+      count,
+      leader,
+      gameId,
+      paramsKey,
+    );
   }
 
   // ---------- reports (club.md §17-3) ----------
@@ -560,14 +608,75 @@ export class Store {
 
   // ---------- results ----------
 
-  /** Submission order (club.md §5-3); the client orders by the game's axis. */
-  results(challengeId: string, limit: number): ResultRow[] {
-    return this.db
-      .all(`SELECT * FROM results WHERE challenge_id = ? ORDER BY seq LIMIT ?`, challengeId, limit)
+  /**
+   * A challenge's best `limit` results, best first (club.md §5-3): completed results with
+   * the game's axis by that axis, then the rest of the completed, then the played, and
+   * earlier submission first on every tie — the order `resultRank` fixes and the
+   * `results_rank` index stores, so this reads `limit` rows however many were submitted.
+   * The viewer's own row is always in the answer: when it is not among the best it
+   * follows them (one more row, found by the unique index), so a member sees their own
+   * result in a challenge of thousands.
+   */
+  bestResults(challengeId: string, viewerId: string, limit: number): ResultRow[] {
+    const rows = this.db
+      .all(
+        `SELECT * FROM results WHERE challenge_id = ?
+         ORDER BY rank_class, rank_key, seq LIMIT ?`,
+        challengeId,
+        limit,
+      )
       .map(toResult);
+    // Fewer than `limit` rows is every row there is, the viewer's included.
+    if (rows.length >= limit && !rows.some((row) => row.memberId === viewerId)) {
+      const own = this.db.get(
+        `SELECT * FROM results WHERE challenge_id = ? AND member_id = ?`,
+        challengeId,
+        viewerId,
+      );
+      if (own !== undefined) rows.push(toResult(own));
+    }
+    return rows;
   }
 
-  hasResult(challengeId: string, memberId: string): boolean {
+  /**
+   * Whether the member has sent a result to this challenge: one they still have, or one they
+   * deleted (`withdrawResult` leaves a mark). Either way they may not send another —
+   * "one result per member per challenge" outlives the delete.
+   */
+  alreadySubmitted(challengeId: string, memberId: string): boolean {
+    return (
+      this.hasResult(challengeId, memberId) ||
+      this.db.get(
+        `SELECT 1 FROM withdrawn_results WHERE challenge_id = ? AND member_id = ?`,
+        challengeId,
+        memberId,
+      ) !== undefined
+    );
+  }
+
+  /**
+   * A member deleting their own result from a challenge (club.md §5-3
+   * `DELETE /challenges/:id/results/me`): the row goes, `result_count` follows, and a
+   * withdrawal mark is written so they cannot send another. Returns false when they have
+   * no result there. Both reads and the delete use the `(challenge_id, member_id)` key.
+   */
+  withdrawResult(challengeId: string, memberId: string): boolean {
+    if (!this.hasResult(challengeId, memberId)) return false;
+    this.db.run(
+      `DELETE FROM results WHERE challenge_id = ? AND member_id = ?`,
+      challengeId,
+      memberId,
+    );
+    this.db.run(`UPDATE challenges SET result_count = result_count - 1 WHERE id = ?`, challengeId);
+    this.db.run(
+      `INSERT OR IGNORE INTO withdrawn_results (challenge_id, member_id) VALUES (?, ?)`,
+      challengeId,
+      memberId,
+    );
+    return true;
+  }
+
+  private hasResult(challengeId: string, memberId: string): boolean {
     return (
       this.db.get(
         `SELECT 1 FROM results WHERE challenge_id = ? AND member_id = ?`,
@@ -579,21 +688,27 @@ export class Store {
 
   addResult(input: {
     challengeId: string;
+    /** The challenge's game: its contract says where the result sorts. */
+    gameId: string;
     memberId: string;
     nickname: string;
     now: string;
     outcome: Outcome;
     facts: unknown;
   }): ResultRow {
+    const { rankClass, rankKey } = resultRank(input.gameId, input.outcome, input.facts);
     this.db.run(
-      `INSERT INTO results (challenge_id, member_id, nickname, submitted_at, outcome, facts_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO results
+           (challenge_id, member_id, nickname, submitted_at, outcome, facts_json, rank_class, rank_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       input.challengeId,
       input.memberId,
       input.nickname,
       input.now,
       input.outcome,
       JSON.stringify(input.facts),
+      rankClass,
+      rankKey,
     );
     this.db.run(
       `UPDATE challenges SET result_count = result_count + 1 WHERE id = ?`,
@@ -629,27 +744,18 @@ export class Store {
   }
 
   /**
-   * A challenge's best `limit` completed results by the game's axis fact
-   * (`order`, from src/contracts/games.ts), earlier submission first on a tie.
-   * The one place the server ranks a Result; SQLite's JSON1 reads the fact, and
-   * a result whose axis is not a number is left out.
+   * A challenge's best `limit` completed results by the game's axis fact (src/contracts/
+   * games.ts), earlier submission first on a tie — the head of the `results_rank` index,
+   * class 0 of `resultRank`: a result whose axis is not a number is left out. The one
+   * place the server ranks a Result for a reader outside the club.
    */
-  topResults(
-    challengeId: string,
-    order: string,
-    direction: Direction,
-    limit: number,
-  ): TopResultRow[] {
-    const axis = `json_extract(facts_json, '$.' || ?)`;
+  topResults(challengeId: string, limit: number): TopResultRow[] {
     return this.db
       .all(
         `SELECT nickname, facts_json FROM results
-         WHERE challenge_id = ? AND outcome = 'completed'
-           AND typeof(${axis}) IN ('integer', 'real')
-         ORDER BY ${axis} ${direction === 'asc' ? 'ASC' : 'DESC'}, seq LIMIT ?`,
+         WHERE challenge_id = ? AND rank_class = 0
+         ORDER BY rank_key, seq LIMIT ?`,
         challengeId,
-        order,
-        order,
         limit,
       )
       .map((row) => ({
@@ -754,15 +860,24 @@ export class Store {
       // Strictly better only: an equal value stays behind the earlier leader.
       takesLead = leader === undefined || isBetter(input.value, Number(leader.value));
     }
-    this.db.run(
-      `UPDATE ranking_tables
-       SET entry_count = entry_count + ?, leader_member_id = ?
-       WHERE game_id = ? AND params_key = ?`,
-      existing === undefined ? 1 : 0,
-      takesLead ? input.memberId : leaderId,
-      input.gameId,
-      input.paramsKey,
-    );
+    if (existing === undefined) {
+      this.db.run(
+        `UPDATE ranking_tables SET entry_count = entry_count + 1, leader_member_id = ?
+         WHERE game_id = ? AND params_key = ?`,
+        takesLead ? input.memberId : leaderId,
+        input.gameId,
+        input.paramsKey,
+      );
+    } else if (takesLead && leaderId !== input.memberId) {
+      // An improvement leaves the count alone: not naming `entry_count` keeps its index
+      // (`ranking_tables_popular`) from being rewritten for nothing.
+      this.db.run(
+        `UPDATE ranking_tables SET leader_member_id = ? WHERE game_id = ? AND params_key = ?`,
+        input.memberId,
+        input.gameId,
+        input.paramsKey,
+      );
+    }
     return true;
   }
 
@@ -808,17 +923,66 @@ export class Store {
     return n >= scanLimit ? null : n + 1;
   }
 
-  /** The best `limit` rows of a table, in rank order. */
+  /**
+   * The best `limit` rows of a table, in rank order, reading about `limit` rows whatever
+   * the table's size. Lower-is-better is one walk of the `(game_id, params_key, value, seq)`
+   * index. Higher-is-better cannot be: the index runs `seq` ascending under a descending
+   * `value`, so one query would read the whole group tied at the cut before sorting it
+   * (and a capped score ties in hundreds). It is three bounded reads instead: the value at
+   * the cut, the entries strictly above it (fewer than `limit`), and the earliest of those
+   * tied at it.
+   */
   rankingTop(gameId: string, paramsKey: string, limit: number): RankingEntryRow[] {
-    return this.db
+    if (directionOf(gameId) === 'asc') {
+      return this.db
+        .all(
+          `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ?
+           ORDER BY value, seq LIMIT ?`,
+          gameId,
+          paramsKey,
+          limit,
+        )
+        .map(toRankingEntry);
+    }
+    const cut = this.db.get(
+      `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ?
+       ORDER BY value DESC LIMIT 1 OFFSET ?`,
+      gameId,
+      paramsKey,
+      limit - 1,
+    );
+    // Fewer than `limit` entries: every one of them is in the answer.
+    if (cut === undefined) {
+      return this.db
+        .all(
+          `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ?
+           ORDER BY value DESC, seq`,
+          gameId,
+          paramsKey,
+        )
+        .map(toRankingEntry);
+    }
+    const value = Number(cut.value);
+    const above = this.db
       .all(
-        `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ?
-         ORDER BY ${orderBy(directionOf(gameId))} LIMIT ?`,
+        `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ? AND value > ?
+         ORDER BY value DESC, seq`,
         gameId,
         paramsKey,
-        limit,
+        value,
       )
       .map(toRankingEntry);
+    const tied = this.db
+      .all(
+        `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ? AND value = ?
+         ORDER BY seq LIMIT ?`,
+        gameId,
+        paramsKey,
+        value,
+        limit - above.length,
+      )
+      .map(toRankingEntry);
+    return [...above, ...tied];
   }
 
   /**
@@ -839,6 +1003,25 @@ export class Store {
         paramsKey: text(row, 'params_key'),
         entryCount: int(row, 'entry_count'),
         leader: toRankingEntry(row),
+      }));
+  }
+
+  /**
+   * The `limit` most-entered tables, most first (ties by game, then mode): the landing
+   * page's view. Read straight off `ranking_tables_popular`, so the cost is `limit`
+   * rows whatever the number of tables.
+   */
+  popularRankingTables(limit: number): { gameId: string; paramsKey: string; entryCount: number }[] {
+    return this.db
+      .all(
+        `SELECT game_id, params_key, entry_count FROM ranking_tables
+         ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+        limit,
+      )
+      .map((row) => ({
+        gameId: text(row, 'game_id'),
+        paramsKey: text(row, 'params_key'),
+        entryCount: int(row, 'entry_count'),
       }));
   }
 

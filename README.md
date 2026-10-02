@@ -167,21 +167,24 @@ GET    /api/v1/challenges[?after=<id>][&daily=YYYY-MM-DD]  member  Challenge[]  
 POST   /api/v1/challenges                    member        challenge + the creator's result, daily? → Challenge (201; 200 with the existing one when a live challenge has the same gameId + seed + boardDigest)
 GET    /api/v1/challenges/:id                member        Challenge
 DELETE /api/v1/challenges/:id                creator/owner 204
-GET    /api/v1/challenges/:id/results        member        Result[]  (submission order, 200)
-POST   /api/v1/challenges/:id/results        member        one per member → Result
+GET    /api/v1/challenges/:id/results        member        Result[]  (best first by the game's axis, the best 200 (`resultsPage`) and the asker's own row after them when it ranks lower — see below)
+POST   /api/v1/challenges/:id/results        member        one per member → Result (409 `already_submitted` when they already sent one, or deleted theirs)
+DELETE /api/v1/challenges/:id/results/me     member        204; deletes the caller's own result (resultCount follows) and leaves a mark: they cannot send another to this challenge, on this route or by posting the same board to `POST /challenges` (409 `already_submitted`). 404 when they have no result there or the challenge is deleted. Their ranking rows, the challenge and the others' results stay
 GET    /api/v1/records                       member        the rankings' leaders in the old shape ({ gameId, paramsKey, facts, memberId, nickname, challengeId: '' }[])
 POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts } → { gameId, paramsKey, improved, entry, entryCount } (201 when the member's row was inserted or replaced, else 200)
 GET    /api/v1/rankings                      member        [{ gameId, paramsKey, entryCount, leader }] — one per table
 GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry } | null } (top 50, at most 100; `me.rank` is `null` when the viewer is below the `rankingRankScan` ceiling, 1000 better rows, so the count stays bounded)
+DELETE /api/v1/rankings/:gameId/:paramsKey/me  member     204; deletes the caller's own row in that table (the table's count and leader follow; its summary row goes when it empties). 404 when they have no row there. The next finished game enters the table again as usual
 GET    /api/v1/hosting                       member        { provider, manageUrl (owners), referralUrl, lastActivityAt }
 PATCH  /api/v1/hosting                       owner         { referralUrl | null }
 GET    /api/v1/invite                        owner         { token, url }
 POST   /api/v1/invite                        owner         { role: 'member' } rotates · { role: 'owner' } one-use link, 24h
 DELETE /api/v1/members/:id[?purge=1]         owner         204; never the last owner. purge=1 also deletes their results (challenge resultCount follows), ranking rows (table count and leader follow) and reports; without it their results stay under their name
 PATCH  /api/v1/members/:id                   owner         { nickname } → Member; renames their results and ranking rows too and clears the reports against them
+PATCH  /api/v1/me                            member        { nickname } → Member; renames the caller and the name on their results and ranking rows (same nickname rules as join). The reports against them stay (the owner's rename clears them; this does not)
 POST   /api/v1/members/:id/report            member        204; one report per reporter, a second changes nothing; 400 on yourself, 404 on an unknown or removed member
 GET    /api/v1/members/reported              owner         [{ member, reportCount }] — most reported first, then the oldest member
-GET    /api/v1/public[?date=YYYY-MM-DD]      no auth       { club: { name }, memberCount, today: [{ gameId, daily, resultCount, top: [{ nickname, facts }] }], rankings: [{ gameId, paramsKey, entryCount, leader: { nickname, facts } }] } — 404 unless CLUB_OPEN_JOIN; Cache-Control: public, max-age=300 (the Worker caches it 5 minutes)
+GET    /api/v1/public[?date=YYYY-MM-DD]      no auth       { club: { name }, memberCount, today: [{ gameId, daily, resultCount, top: [{ nickname, facts }] }], rankings: [{ gameId, paramsKey, entryCount, leader: { nickname, facts }, top: [{ nickname, facts }] }] } — rankings: the 8 most-entered tables, `top` their best 3; 404 unless CLUB_OPEN_JOIN; Cache-Control: public, max-age=300 (the Worker caches it 5 minutes)
 ```
 
 Every response carries `X-Club-Api: 1`. Errors are
@@ -206,10 +209,21 @@ Points the implementation settles within the contract:
 - A `nickname` (claim, join, rename) is NFC-normalized, trimmed, runs of whitespace
   collapsed, must hold at least one letter or number and no control, format,
   private-use, surrogate or unassigned code point, and is 1..24 code points (club.md §17-1).
+- `GET /challenges/:id/results` is ordered, not in arrival order: completed results
+  with the game's axis first, by that axis (best first, per `src/contracts/games.ts`),
+  then the other completed results, then the played ones, and an earlier submission
+  first on every tie (a game the server has no axis for is in arrival order within
+  completed and played). It returns the best `resultsPage` (200) rows — a challenge
+  of thousands is not read in full — and always the asker's own row: when it ranks
+  below the page it is appended after the page's rows (so up to 201 rows). The order is
+  kept in `results.rank_class` / `rank_key` (schema 5) and an index over them; a change
+  to `src/contracts/games.ts` needs a schema bump that calls `rerankResults`.
 - `GET /public` is the landing page's excerpt (club.md §18): the top three completed
   results of each challenge tagged with that `daily`, ordered by the game's axis from
-  `src/contracts/games.ts` (a game it does not know lists no `top`), and the rankings'
-  leaders — names and facts, no member ids. `date` defaults to the request clock's UTC
+  `src/contracts/games.ts` (a game it does not know lists no `top`), and the eight
+  most-entered ranking tables (ties by game, then mode), each with its best three
+  (`top`, ties by arrival) and `entryCount`, `leader` being `top[0]` — names and facts,
+  no member ids. `date` defaults to the request clock's UTC
   day. It is the only route that sends `Cache-Control: public`; every other response is `no-store`.
 - Limits: 5 owners and 100 members per club, 10 join/claim attempts per IP per
   minute, 60 requests per member per minute, `GET /club` lists the newest 50 members (`membersPage`), 16KB per request, 1KB per

@@ -1,7 +1,7 @@
 /**
  * Challenges and results (club.md §5-3, §5-4, §6-3). A challenge is created
  * together with its creator's result — "I did this; you?" — and each member
- * submits once.
+ * submits once. A challenge's results are read best first (src/contracts/games.ts).
  */
 import { newId } from '../auth/tokens.js';
 import { API_VERSION } from '../limits.js';
@@ -43,11 +43,12 @@ export function registerChallenges(router: Router, deps: Deps): void {
     // keeps the first sender's title and daily tag.
     const existing = store.liveChallengeOnBoard(gameId, seed, boardDigest, member.id);
     if (existing !== null) {
-      if (store.hasResult(existing.id, member.id)) {
+      if (store.alreadySubmitted(existing.id, member.id)) {
         throw conflict('already_submitted', 'one result per member per challenge');
       }
       store.addResult({
         challengeId: existing.id,
+        gameId: existing.gameId,
         memberId: member.id,
         nickname: member.nickname,
         now,
@@ -75,6 +76,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     });
     store.addResult({
       challengeId: id,
+      gameId,
       memberId: member.id,
       nickname: member.nickname,
       now,
@@ -109,11 +111,14 @@ export function registerChallenges(router: Router, deps: Deps): void {
     '/api/v1/challenges/:id/results',
     { auth: 'member', limit: 'member' },
     (ctx) => {
-      const challenge = store.challengeById(ctx.params.id!, ctx.member!.id);
+      const member = ctx.member!;
+      const challenge = store.challengeById(ctx.params.id!, member.id);
       if (challenge === null) throw notFound('no such challenge');
+      // The best `resultsPage` by the game's axis, best first, and the caller's own row
+      // wherever it ranks (club.md §5-3) — not the first ones to arrive.
       return {
         status: 200,
-        body: store.results(challenge.id, limits.resultsPage).map(resultShape),
+        body: store.bestResults(challenge.id, member.id, limits.resultsPage).map(resultShape),
       };
     },
   );
@@ -140,13 +145,14 @@ export function registerChallenges(router: Router, deps: Deps): void {
           'the board this device generated is not the board of the challenge',
         );
       }
-      if (store.hasResult(challenge.id, member.id)) {
+      if (store.alreadySubmitted(challenge.id, member.id)) {
         throw conflict('already_submitted', 'one result per member per challenge');
       }
 
       const now = iso(ctx.now);
       const result = store.addResult({
         challengeId: challenge.id,
+        gameId: challenge.gameId,
         memberId: member.id,
         nickname: member.nickname,
         now,
@@ -155,6 +161,20 @@ export function registerChallenges(router: Router, deps: Deps): void {
       });
       store.touchActivity(now);
       return { status: 201, body: resultShape(result) };
+    },
+  );
+  // The caller leaves this challenge: their result is deleted and they cannot send another
+  // (the same 409 `already_submitted` on both ways in). Their own row only.
+  router.add(
+    'DELETE',
+    '/api/v1/challenges/:id/results/me',
+    { auth: 'member', limit: 'member' },
+    (ctx) => {
+      const member = ctx.member!;
+      const challenge = store.challengeById(ctx.params.id!, member.id);
+      if (challenge === null) throw notFound('no such challenge');
+      if (!store.withdrawResult(challenge.id, member.id)) throw notFound('no result of yours');
+      return { status: 204 };
     },
   );
 }

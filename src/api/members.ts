@@ -5,6 +5,10 @@
  * Reports and the owner's two remedies — rename, and remove with the work —
  * are the whole of the Public deployment's moderation: no notification, no
  * automatic judgement, no freeze.
+ *
+ * `PATCH /me` is the member's own lever (§5-3): change one's name. It does not touch
+ * the reports against the member — a name change must not reset the count. Deleting
+ * one's own records is per record, next to the records (rankings.ts, challenges.ts).
  */
 import { conflict, invalidRequest, notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
@@ -20,6 +24,13 @@ export function registerMembers(router: Router, deps: Deps): void {
     if (member === null || member.revokedAt !== null) throw notFound('no such member');
     return member;
   };
+
+  router.add('PATCH', '/api/v1/me', { auth: 'member', limit: 'member' }, async (ctx) => {
+    const body = await ctx.body();
+    const nickname = v.nickname(body.nickname);
+    store.renameSelf(ctx.member!.id, nickname);
+    return { status: 200, body: memberShape({ ...ctx.member!, nickname }) };
+  });
 
   // Registered before `/members/:id` routes: a literal segment never meets a `:id` match
   // because the methods differ, but the order keeps the table easy to read.
