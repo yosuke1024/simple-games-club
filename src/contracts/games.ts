@@ -1,31 +1,69 @@
 /**
- * The one place the server reads into `params` and `facts`: deriving club
- * records (club.md §5-4). It knows exactly what club.md §6-1 fixes per game —
- * which fact is the comparison axis, and which param names the "mode" a
- * record is kept for — and nothing else. A game missing here simply has no
- * records until the server learns it; its challenges and results work as
- * they are.
+ * The one place the server reads into `facts`: ranking a result (club.md §16,
+ * §6-1). It knows exactly what club.md §6-1 fixes per game — which fact is the
+ * axis a table is ordered by, and which direction is better — and nothing
+ * else. The mode a table is kept for is not here: the client's contract
+ * computes `paramsKey` and the server only checks its shape. A game missing
+ * here simply has no rankings until the server learns it; its challenges and
+ * results work as they are (Checkers, Connect Four, Gomoku and Ludo are
+ * deliberately absent — club.md §16).
  */
+export type Direction = 'asc' | 'desc';
+
 export interface GameContract {
-  /** The fact compared, ascending — lower is the record. */
+  /** The name of the fact compared. */
   order: string;
-  /** The mode key, from the challenge's params; null when the params are not this game's shape. */
-  paramsKey: (params: unknown) => string | null;
+  /** `asc`: lower is better (time, moves). `desc`: higher is better (score). */
+  direction: Direction;
 }
 
-const field =
-  (name: string) =>
-  (params: unknown): string | null => {
-    if (typeof params !== 'object' || params === null) return null;
-    const value = (params as Record<string, unknown>)[name];
-    return typeof value === 'string' && value !== '' ? value : null;
-  };
+const of = (order: string, direction: Direction, ids: readonly string[]) =>
+  ids.map((id): [string, GameContract] => [id, { order, direction }]);
 
-export const GAME_CONTRACTS: Readonly<Record<string, GameContract>> = {
-  sudoku: { order: 'elapsedSeconds', paramsKey: field('difficulty') },
-  minesweeper: { order: 'elapsedSeconds', paramsKey: field('difficulty') },
-  'water-sort': { order: 'moves', paramsKey: field('tier') },
-};
+export const GAME_CONTRACTS: Readonly<Record<string, GameContract>> = Object.fromEntries([
+  ...of('elapsedSeconds', 'asc', [
+    'sudoku',
+    'sudoku-6x6',
+    'minesweeper',
+    'nonogram',
+    'takuzu',
+    'kakuro',
+    'futoshiki',
+    'crown-grid',
+    'number-path',
+    'shape-regions',
+    'schulte-table',
+    'binary-balance',
+    'box-regions',
+    'quick-math',
+    'memory-match',
+    'mahjong-solitaire',
+  ]),
+  ...of('moves', 'asc', [
+    'water-sort',
+    'sliding-puzzle',
+    'solitaire',
+    'spider-solitaire',
+    'freecell',
+    'number-match',
+  ]),
+  ...of('attempts', 'asc', ['hit-and-blow']),
+  ...of('score', 'desc', [
+    '2048',
+    'block-puzzle',
+    'bunny-hop',
+    'sky-fighter',
+    'number-recall',
+    'yacht',
+    'gin-rummy',
+    'dominoes',
+    'mancala',
+    'reversi',
+    'dots-and-boxes',
+  ]),
+  // Hearts is scored like golf: fewer points win.
+  ...of('score', 'asc', ['hearts']),
+]);
 
 /** The axis value of a result, or null when the facts do not carry a usable number. */
 export function axisValue(contract: GameContract, facts: unknown): number | null {

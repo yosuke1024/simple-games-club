@@ -22,7 +22,27 @@ function stringField(value: unknown, name: string, min: number, max: number): st
 export const nickname = (value: unknown): string => stringField(value, 'nickname', 1, 24);
 export const clubName = (value: unknown): string => stringField(value, 'name', 1, 40);
 export const seed = (value: unknown): string => stringField(value, 'seed', 1, 80);
+/** A ranking result's seed may be empty: an arcade run has no board to name (club.md §16-1). */
+export const seedOrEmpty = (value: unknown): string => stringField(value, 'seed', 0, 80);
 export const boardDigest = (value: unknown): string => stringField(value, 'boardDigest', 1, 64);
+/** `boardDigest` on a ranking result may be null: not every game has a digest (club.md §16). */
+export const boardDigestOrNull = (value: unknown): string | null =>
+  value === null ? null : boardDigest(value);
+/** `paramsKey`: the table's mode key. The client's contract computes it; only its shape is checked. */
+export const paramsKey = (value: unknown): string => {
+  if (typeof value !== 'string' || !/^[a-z0-9-]{1,40}$/.test(value)) {
+    throw invalidRequest('paramsKey must be 1..40 characters of a-z, 0-9 and -');
+  }
+  return value;
+};
+/** `?top=`: absent means the default; otherwise a positive integer, capped. */
+export const top = (value: string | null, fallback: number, max: number): number => {
+  if (value === null) return fallback;
+  if (!/^\d+$/.test(value) || Number(value) < 1) {
+    throw invalidRequest('top must be a positive integer');
+  }
+  return Math.min(Number(value), max);
+};
 export const gameId = (value: unknown): string => {
   const id = stringField(value, 'gameId', 1, 40);
   if (!/^[a-z0-9-]+$/.test(id)) throw invalidRequest('gameId must be a lower-case game id');

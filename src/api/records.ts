@@ -1,9 +1,8 @@
 /**
- * `GET /records` — club records (club.md §5-4): per game and mode, the lowest
- * value on that game's axis among completed results of live challenges, ties
- * to the earliest. The store keeps them as results arrive and rebuilds a
- * game's when one of its challenges is deleted, so this read is one small
- * table rather than every result of the club.
+ * `GET /records` — the old form of the rankings' leaders (club.md §16-1): one
+ * row per table, the best member's row. Kept so a client that predates
+ * rankings still reads something true; `challengeId` is always `''` because a
+ * record no longer belongs to a challenge.
  */
 import type { Router } from '../http/router.js';
 import type { Deps } from './deps.js';
