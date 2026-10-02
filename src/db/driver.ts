@@ -9,6 +9,7 @@
 import { contractOf, resultRank } from '../contracts/games.js';
 import {
   DAILY_INDEX_SQL,
+  MEMBER_ROWS_INDEX_SQL,
   RANKING_INDEX_SQL,
   RANKING_POPULAR_INDEX_SQL,
   RESULT_RANK_INDEX_SQL,
@@ -39,6 +40,7 @@ export function migrate(db: SqlDriver): void {
     db.exec(REPORTED_INDEX_SQL);
     db.exec(RESULT_RANK_INDEX_SQL);
     db.exec(RANKING_POPULAR_INDEX_SQL);
+    db.exec(MEMBER_ROWS_INDEX_SQL);
     return;
   }
   const stored = Number(row.value);
@@ -58,6 +60,7 @@ export function migrate(db: SqlDriver): void {
   db.exec(REPORTED_INDEX_SQL);
   db.exec(RESULT_RANK_INDEX_SQL);
   db.exec(RANKING_POPULAR_INDEX_SQL);
+  db.exec(MEMBER_ROWS_INDEX_SQL);
 }
 
 /**

@@ -177,3 +177,15 @@ export const RANKING_POPULAR_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS ranking_tables_popular
   ON ranking_tables (entry_count DESC, game_id, params_key);
 `;
+
+/**
+ * A member's own rows. Neither table's key leads with `member_id` (results: `challenge_id`;
+ * ranking_entries: `game_id, params_key`), so without these a member's rename or erase
+ * (`PATCH /me`, `DELETE /me/records`) reads every row of both tables. Like the other indexes
+ * they are created idempotently on every start, so no schema version is needed; the price is
+ * one more index row written per result and per new ranking entry (docs/cloudflare.md §5).
+ */
+export const MEMBER_ROWS_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS results_member ON results (member_id);
+CREATE INDEX IF NOT EXISTS ranking_entries_member ON ranking_entries (member_id);
+`;

@@ -289,19 +289,43 @@ export class Store {
    * the remedy has been applied.
    */
   renameMember(id: string, nickname: string): void {
-    this.db.run(`UPDATE members SET nickname = ? WHERE id = ?`, nickname, id);
-    this.db.run(`UPDATE results SET nickname = ? WHERE member_id = ?`, nickname, id);
-    this.db.run(`UPDATE ranking_entries SET nickname = ? WHERE member_id = ?`, nickname, id);
+    this.setNickname(id, nickname);
     this.clearReports(id);
   }
 
   /**
+   * A member renaming themselves (club.md §5-3 `PATCH /me`): the same name
+   * change, but the reports against them stay — otherwise a reported member
+   * could reset the count by renaming.
+   */
+  renameSelf(id: string, nickname: string): void {
+    this.setNickname(id, nickname);
+  }
+
+  private setNickname(id: string, nickname: string): void {
+    this.db.run(`UPDATE members SET nickname = ? WHERE id = ?`, nickname, id);
+    this.db.run(`UPDATE results SET nickname = ? WHERE member_id = ?`, nickname, id);
+    this.db.run(`UPDATE ranking_entries SET nickname = ? WHERE member_id = ?`, nickname, id);
+  }
+
+  /**
    * The owner's remedy of removing with the work (club.md §17-3): the member's
-   * results (and their challenges' `result_count`), their ranking rows (and each
-   * table's summary row: count, leader), and the reports against them. Call
-   * `revokeMember` as well; this does not.
+   * records (`eraseRecords`) and the reports against them. Call `revokeMember`
+   * as well; this does not.
    */
   purgeMember(id: string): void {
+    this.eraseRecords(id);
+    this.clearReports(id);
+  }
+
+  /**
+   * A member's own work and nothing else: their results (and their challenges'
+   * `result_count`) and their ranking rows (and each table's summary row: count,
+   * leader). The member, their token and the reports against them stay — it is
+   * the one implementation behind the owner's purge and `DELETE /me/records`.
+   * Challenges they created stay too: other members' results hang off them.
+   */
+  eraseRecords(id: string): void {
     this.db.run(
       `UPDATE challenges SET result_count = result_count - 1
        WHERE id IN (SELECT challenge_id FROM results WHERE member_id = ?)`,
@@ -360,7 +384,6 @@ export class Store {
         paramsKey,
       );
     }
-    this.clearReports(id);
   }
 
   // ---------- reports (club.md §17-3) ----------

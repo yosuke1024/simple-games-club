@@ -5,6 +5,11 @@
  * Reports and the owner's two remedies — rename, and remove with the work —
  * are the whole of the Public deployment's moderation: no notification, no
  * automatic judgement, no freeze.
+ *
+ * `PATCH /me` and `DELETE /me/records` are the member's own two levers (§5-3):
+ * change one's name, and erase one's own records while staying in the Club.
+ * Neither touches the reports against the member — a name change must not
+ * reset the count, and erasing the work is not an answer to a report.
  */
 import { conflict, invalidRequest, notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
@@ -20,6 +25,18 @@ export function registerMembers(router: Router, deps: Deps): void {
     if (member === null || member.revokedAt !== null) throw notFound('no such member');
     return member;
   };
+
+  router.add('PATCH', '/api/v1/me', { auth: 'member', limit: 'member' }, async (ctx) => {
+    const body = await ctx.body();
+    const nickname = v.nickname(body.nickname);
+    store.renameSelf(ctx.member!.id, nickname);
+    return { status: 200, body: memberShape({ ...ctx.member!, nickname }) };
+  });
+
+  router.add('DELETE', '/api/v1/me/records', { auth: 'member', limit: 'member' }, (ctx) => {
+    store.eraseRecords(ctx.member!.id);
+    return { status: 204 };
+  });
 
   // Registered before `/members/:id` routes: a literal segment never meets a `:id` match
   // because the methods differ, but the order keeps the table easy to read.
