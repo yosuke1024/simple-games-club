@@ -127,10 +127,7 @@ describe('POST /api/v1/rankings/results (club.md §16)', () => {
     await send(yoh, { elapsedSeconds: 300 });
     await send(yoh, { elapsedSeconds: 100 }); // ties Ken, arrives later
     const table = await server.api('/api/v1/rankings/sudoku/hard', { token: yoh.token });
-    expect(table.json.entries.map((e: { nickname: string }) => e.nickname)).toEqual([
-      'Ken',
-      'Yoh',
-    ]);
+    expect(table.json.entries.map((e: { nickname: string }) => e.nickname)).toEqual(['Ken', 'Yoh']);
     expect(table.json.me.rank).toBe(2);
     const list = await server.api('/api/v1/rankings', { token: yoh.token });
     expect(list.json[0].leader.nickname).toBe('Ken');

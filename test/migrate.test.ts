@@ -167,9 +167,7 @@ describe('migrate() from schema 1', () => {
     });
     expect(d.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`)?.value).toBe('7');
     expect(
-      d.all(
-        `SELECT game_id, entry_count, leader_member_id FROM ranking_tables ORDER BY game_id`,
-      ),
+      d.all(`SELECT game_id, entry_count, leader_member_id FROM ranking_tables ORDER BY game_id`),
     ).toEqual([
       { game_id: '2048', entry_count: 3, leader_member_id: 'b' },
       { game_id: 'hearts', entry_count: 1, leader_member_id: 'a' },
