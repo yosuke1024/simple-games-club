@@ -19,7 +19,13 @@ export default tseslint.config(
     // Plain-JS scripts run on Node; the TypeScript files get these from @types/node.
     files: ['scripts/**/*.mjs'],
     languageOptions: {
-      globals: { console: 'readonly', fetch: 'readonly', TextEncoder: 'readonly' },
+      globals: {
+        console: 'readonly',
+        fetch: 'readonly',
+        performance: 'readonly',
+        process: 'readonly',
+        TextEncoder: 'readonly',
+      },
     },
   },
 );

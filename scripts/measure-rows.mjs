@@ -1,42 +1,71 @@
-// The cost drivers of the Cloudflare deployment, measured locally: for each
-// request of one club's life (claim → invite → join → challenge → result →
-// records) the rows the Durable Object read and wrote — the numbers SQLite
-// storage is billed by — and the response size. Runs the deployed bundle in
-// workerd (Miniflare), as the contract tests do; production figures come from
-// the dashboard after a real deploy (docs/cloudflare.md).
+// The cost drivers of the Cloudflare deployment, measured: for each request of
+// one club's life (claim → invite → join → challenge → result → records) the
+// rows the Durable Object read and wrote — the numbers SQLite storage is billed
+// by — the response size, and the round-trip time. Two modes:
 //
 //   pnpm measure:rows
+//       the deployed bundle in workerd (Miniflare); rows come back on the
+//       X-Club-Rows header, which only test mode sets
+//   CLUB_URL=https://… CLUB_SETUP_KEY=… node scripts/measure-rows.mjs
+//       a real, still unclaimed deployment; rows are read from the dashboard
+//       instead, and the time is the real round trip
+//
+// Production figures belong in docs/cloudflare.md §7.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { unstable_getMiniflareWorkerOptions } from 'wrangler';
 
 const ROOT = join(import.meta.dirname, '..');
-const SETUP_KEY = 'measure-setup-key-0123456789abcdef';
+const live = process.env.CLUB_URL?.replace(/\/+$/, '') ?? null;
+const SETUP_KEY = live ? process.env.CLUB_SETUP_KEY : 'measure-setup-key-0123456789abcdef';
+if (live && !SETUP_KEY) {
+  throw new Error("CLUB_URL needs CLUB_SETUP_KEY (the deployment's unclaimed key)");
+}
+// A real deployment sees one client address, and /join is limited to 10 a minute
+// per address (club.md §5-1); the fuller club stays under that.
+const MEMBERS = live ? 9 : 20;
 
-const { workerOptions } = unstable_getMiniflareWorkerOptions(join(ROOT, 'wrangler.toml'));
-const { compatibilityDate, compatibilityFlags, durableObjects } = workerOptions;
-const persist = mkdtempSync(join(tmpdir(), 'sg-club-measure-'));
-const mf = new Miniflare(
-  convertV4MiniflareOptions({
-    workers: [
-      {
-        name: 'simple-games-club',
-        rootPath: ROOT,
-        modulesRoot: ROOT,
-        modules: true,
-        scriptPath: join(ROOT, 'dist-worker', 'index.js'),
-        compatibilityDate,
-        compatibilityFlags,
-        durableObjects,
-        bindings: { CLUB_SETUP_KEY: SETUP_KEY, CLUB_SECRET: 'measure-secret', CLUB_TEST_MODE: '1' },
-      },
-    ],
-    durableObjectsPersist: persist,
-  }),
-);
-const origin = (await mf.ready).origin;
+let origin;
+let runtime;
+let dispose = async () => {};
+if (live) {
+  origin = live;
+  runtime = `against ${live}`;
+} else {
+  const { Miniflare, convertV4MiniflareOptions } = await import('miniflare');
+  const { unstable_getMiniflareWorkerOptions } = await import('wrangler');
+  const { workerOptions } = unstable_getMiniflareWorkerOptions(join(ROOT, 'wrangler.toml'));
+  const { compatibilityDate, compatibilityFlags, durableObjects } = workerOptions;
+  const persist = mkdtempSync(join(tmpdir(), 'sg-club-measure-'));
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      workers: [
+        {
+          name: 'simple-games-club',
+          rootPath: ROOT,
+          modulesRoot: ROOT,
+          modules: true,
+          scriptPath: join(ROOT, 'dist-worker', 'index.js'),
+          compatibilityDate,
+          compatibilityFlags,
+          durableObjects,
+          bindings: {
+            CLUB_SETUP_KEY: SETUP_KEY,
+            CLUB_SECRET: 'measure-secret',
+            CLUB_TEST_MODE: '1',
+          },
+        },
+      ],
+      durableObjectsPersist: persist,
+    }),
+  );
+  origin = (await mf.ready).origin;
+  runtime = `in workerd ${compatibilityDate} via Miniflare`;
+  dispose = async () => {
+    await mf.dispose();
+    rmSync(persist, { recursive: true, force: true });
+  };
+}
 
 const rows = [];
 async function call(label, path, { method, token, body, ip } = {}) {
@@ -44,20 +73,24 @@ async function call(label, path, { method, token, body, ip } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (ip) headers['CF-Connecting-IP'] = ip;
+  const verb = method ?? (body === undefined ? 'GET' : 'POST');
+  const startedAt = performance.now();
   const response = await fetch(`${origin}${path}`, {
-    method: method ?? (body === undefined ? 'GET' : 'POST'),
+    method: verb,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await response.text();
+  const ms = Math.round(performance.now() - startedAt);
   const counted = /read=(\d+); written=(\d+)/.exec(response.headers.get('x-club-rows') ?? '');
   rows.push({
     label,
-    request: `${method ?? (body === undefined ? 'GET' : 'POST')} ${path.replace(/\/(c|m|ch|inv)_[A-Za-z0-9_-]+/g, '/:id')}`,
+    request: `${verb} ${path.replace(/\/(c|m|ch|inv)_[A-Za-z0-9_-]+/g, '/:id')}`,
     status: response.status,
     read: counted ? Number(counted[1]) : NaN,
     written: counted ? Number(counted[2]) : NaN,
     bytes: new TextEncoder().encode(text).byteLength,
+    ms,
   });
   return text === '' ? null : JSON.parse(text);
 }
@@ -83,6 +116,10 @@ await call('health, unclaimed', '/api/v1/health');
 const owner = await call('claim', '/api/v1/claim', {
   body: { setupKey: SETUP_KEY, nickname: 'Yoh' },
 });
+if (!owner?.memberToken) {
+  await dispose();
+  throw new Error(`claim failed: ${JSON.stringify(owner)}`);
+}
 await call('health, claimed', '/api/v1/health');
 const invite = await call('read invite', '/api/v1/invite', { token: owner.memberToken });
 const member = await call('join', '/api/v1/join', {
@@ -114,10 +151,11 @@ await call('409 (second result)', `/api/v1/challenges/${challenge.id}/results`, 
   token: member.memberToken,
   body: resultBody(300),
 });
+const firstPart = rows.length;
 
-// --- The same reads in a fuller club: 20 members, 10 challenges, 200 results
+// --- The same reads in a fuller club: MEMBERS members, 10 challenges ------
 const members = [owner, member];
-for (let i = members.length; i < 20; i++) {
+for (let i = members.length; i < MEMBERS; i++) {
   members.push(
     await call('(seed) join', '/api/v1/join', {
       body: { inviteToken: invite.token, nickname: `M${i}` },
@@ -143,35 +181,41 @@ for (const [c, ch] of challenges.entries()) {
     });
   }
 }
-const seeded = rows.filter((r) => r.label.startsWith('(seed)'));
-const full = rows.length;
-await call('club (20 members)', '/api/v1/club', { token: member.memberToken });
+const seeded = rows.slice(firstPart);
+const resultCount = seeded.filter((r) => r.label === '(seed) result').length + 2;
+const fullPart = rows.length;
+await call(`club (${MEMBERS} members)`, '/api/v1/club', { token: member.memberToken });
 await call('list challenges (10)', '/api/v1/challenges', { token: member.memberToken });
-await call('results (20)', `/api/v1/challenges/${challenge.id}/results`, {
+await call(`results (${MEMBERS})`, `/api/v1/challenges/${challenge.id}/results`, {
   token: owner.memberToken,
 });
-await call('records (10 challenges, 200 results)', '/api/v1/records', { token: owner.memberToken });
+await call(`records (10 challenges, ${resultCount} results)`, '/api/v1/records', {
+  token: owner.memberToken,
+});
 
-await mf.dispose();
-rmSync(persist, { recursive: true, force: true });
+await dispose();
 
+const n = (value) => (Number.isNaN(value) ? '—' : String(value));
 const table = (list) => {
-  console.log('| Step | Request | Status | Rows read | Rows written | Response bytes |');
-  console.log('| --- | --- | ---: | ---: | ---: | ---: |');
+  console.log('| Step | Request | Status | Rows read | Rows written | Response bytes | ms |');
+  console.log('| --- | --- | ---: | ---: | ---: | ---: | ---: |');
   for (const r of list) {
     console.log(
-      `| ${r.label} | \`${r.request}\` | ${r.status} | ${r.read} | ${r.written} | ${r.bytes} |`,
+      `| ${r.label} | \`${r.request}\` | ${r.status} | ${n(r.read)} | ${n(r.written)} | ${r.bytes} | ${r.ms} |`,
     );
   }
 };
-console.log(
-  `\nMeasured in workerd ${compatibilityDate} via Miniflare, ${new Date().toISOString().slice(0, 10)}.\n`,
-);
+const sum = (list, key) => list.reduce((total, r) => total + r[key], 0);
+console.log(`\nMeasured ${runtime}, ${new Date().toISOString().slice(0, 10)}.\n`);
 console.log('### One club, request by request\n');
-table(rows.filter((r, i) => i < full && !r.label.startsWith('(seed)')));
-console.log('\n### The same reads with 20 members, 10 challenges, 200 results\n');
-table(rows.slice(full));
-const sum = (list, key) => list.reduce((n, r) => n + r[key], 0);
+table(rows.slice(0, firstPart));
 console.log(
-  `\nSeeding the fuller club took ${seeded.length} requests, ${sum(seeded, 'read')} rows read, ${sum(seeded, 'written')} rows written.`,
+  `\n### The same reads with ${MEMBERS} members, 10 challenges, ${resultCount} results\n`,
+);
+table(rows.slice(fullPart));
+console.log(
+  `\nSeeding the fuller club took ${seeded.length} requests, ${n(sum(seeded, 'read'))} rows read, ${n(sum(seeded, 'written'))} rows written, ${sum(seeded, 'ms')} ms in total.`,
+);
+console.log(
+  `All told: ${rows.length} requests, ${rows.filter((r) => r.status >= 500).length} server errors, ${rows.filter((r) => r.status === 429).length} rate-limited.`,
 );

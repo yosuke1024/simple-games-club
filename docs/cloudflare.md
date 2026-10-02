@@ -91,8 +91,9 @@ Every `/api/*` request is **one Worker request + one Durable Object request**, p
 rows it reads and writes, plus the object's time. The rows are what the storage quota
 counts, so they were measured — in workerd (Miniflare), running the bundle wrangler
 builds, with the object reporting `rowsRead` / `rowsWritten` from each statement's
-cursor (`pnpm measure:rows`, `scripts/measure-rows.mjs`). Index entries count as rows
-written, which is why a claim writes 13.
+cursor (`pnpm measure:rows`, `scripts/measure-rows.mjs`; the same script runs against a
+real deployment with `CLUB_URL` and `CLUB_SETUP_KEY`, recording round-trip times instead
+of rows). Index entries count as rows written, which is why a claim writes 13.
 
 Measured 2026-10-01, workerd compatibility date 2026-09-01:
 
@@ -117,21 +118,21 @@ Measured 2026-10-01, workerd compatibility date 2026-09-01:
 | 409 (bad invite)          | `POST /api/v1/join`                   |    409 |         1 |            0 |             77 |
 | 409 (second result)       | `POST /api/v1/challenges/:id/results` |    409 |         7 |            0 |             86 |
 
-### The same reads with 20 members, 10 challenges, 200 results
+### The same reads with 20 members, 10 challenges, 191 results
 
 | Step                                 | Request                              | Status | Rows read | Rows written | Response bytes |
 | ------------------------------------ | ------------------------------------ | -----: | --------: | -----------: | -------------: |
 | club (20 members)                    | `GET /api/v1/club`                   |    200 |        22 |            0 |           2094 |
 | list challenges (10)                 | `GET /api/v1/challenges`             |    200 |       240 |            0 |           2740 |
 | results (20)                         | `GET /api/v1/challenges/:id/results` |    200 |        66 |            0 |           3273 |
-| records (10 challenges, 200 results) | `GET /api/v1/records`                |    200 |       401 |            0 |            171 |
+| records (10 challenges, 191 results) | `GET /api/v1/records`                |    200 |       401 |            0 |            171 |
 
-Seeding that club took 216 requests, 3,984 rows read, 909 rows written.
+Seeding that club took 216 requests, 3,985 rows read, 909 rows written (236 requests in all, none failed).
 
 Two reads grow with the club and are the first thing a Public deployment must bound
 (plan PR C): **`GET /challenges`** counts every challenge's results on the way out
 (≈ 24 rows per listed challenge here), and **`GET /records`** derives the records by
-reading every completed result (≈ 2 rows per result). For a club of friends this is
+reading every completed result (≈ 2 rows per result; 401 for 191). For a club of friends this is
 nothing; for one room with the world in it, it is the cost driver. Both are
 implementation choices inside the contract (club.md §0「決めないこと」), fixable by
 keeping counts and records as rows instead of recomputing them.
