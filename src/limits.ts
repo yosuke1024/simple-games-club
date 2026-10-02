@@ -20,6 +20,10 @@ export interface Limits {
   challengePage: number;
   /** `GET /challenges/:id/results`. */
   resultsPage: number;
+  /** `GET /rankings/:gameId/:paramsKey` default rows — club.md §16. */
+  rankingTop: number;
+  /** The most rows `?top=` may ask for. */
+  rankingTopMax: number;
   /** Owner links — one use, and this long. */
   ownerLinkTtlMs: number;
 }
@@ -33,6 +37,8 @@ export const DEFAULT_LIMITS: Limits = {
   smallJsonBytes: 1024,
   challengePage: 50,
   resultsPage: 200,
+  rankingTop: 50,
+  rankingTopMax: 100,
   ownerLinkTtlMs: 24 * 60 * 60 * 1000,
 };
 

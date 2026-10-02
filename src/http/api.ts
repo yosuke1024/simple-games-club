@@ -15,6 +15,7 @@ import { registerHealth } from '../api/health.js';
 import { registerHosting } from '../api/hosting.js';
 import { registerInvites } from '../api/invites.js';
 import { registerMembers } from '../api/members.js';
+import { registerRankings } from '../api/rankings.js';
 import { registerRecords } from '../api/records.js';
 import { bearerToken, hashToken } from '../auth/tokens.js';
 import type { Store } from '../db/store.js';
@@ -75,6 +76,7 @@ export function createApi(options: ApiOptions): Api {
   registerClub(router, deps);
   registerChallenges(router, deps);
   registerRecords(router, deps);
+  registerRankings(router, deps);
   registerHosting(router, deps);
   registerInvites(router, deps);
   registerMembers(router, deps);

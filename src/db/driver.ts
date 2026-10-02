@@ -7,7 +7,6 @@
  * a script with no bindings (the schema); the other three take bindings.
  */
 import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
-import { Store } from './store.js';
 
 export type SqlValue = string | number | null;
 /** A row as the engine hands it back; the store narrows each column itself. */
@@ -37,11 +36,12 @@ export function migrate(db: SqlDriver): void {
     );
   }
   if (stored < 2) upgradeToV2(db);
+  if (stored < 3) upgradeToV3(db);
 }
 
 /**
- * v1 → v2. SCHEMA_SQL above has already created `records` and the board index
- * (both IF NOT EXISTS); what an old `challenges` table lacks is added here,
+ * v1 → v2. SCHEMA_SQL above has already created the board index
+ * (IF NOT EXISTS); what an old `challenges` table lacks is added here,
  * checked first so a run that stopped half-way can simply run again.
  */
 function upgradeToV2(db: SqlDriver): void {
@@ -56,6 +56,16 @@ function upgradeToV2(db: SqlDriver): void {
     `UPDATE challenges SET result_count =
        (SELECT COUNT(*) FROM results r WHERE r.challenge_id = challenges.id)`,
   );
-  new Store(db).rebuildRecords(null);
+  db.run(`UPDATE meta SET value = '2' WHERE key = 'schema_version'`);
+}
+
+/**
+ * v2 → v3. SCHEMA_SQL has already created `ranking_entries` and its index
+ * (IF NOT EXISTS). The v2 `records` table is dropped, not carried over: it
+ * was derived from challenge results, which rankings no longer follow
+ * (club.md §16), so there is nothing in it a ranking could honestly inherit.
+ */
+function upgradeToV3(db: SqlDriver): void {
+  db.exec(`DROP TABLE IF EXISTS records`);
   db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
 }

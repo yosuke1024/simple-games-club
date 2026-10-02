@@ -1,7 +1,7 @@
 /**
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
-import { GAME_CONTRACTS, axisValue } from '../contracts/games.js';
+import { GAME_CONTRACTS, type Direction } from '../contracts/games.js';
 import type { Row, SqlDriver } from './driver.js';
 
 export type Role = 'owner' | 'member';
@@ -60,26 +60,41 @@ export interface ResultRow {
   facts: unknown;
 }
 
-/** A club record as stored: the best completed result of one game and mode (club.md §5-4). */
+/** A club record in the old `GET /records` shape — the leader of one ranking table (club.md §16-1). */
 export interface RecordRow {
   gameId: string;
   paramsKey: string;
   facts: unknown;
   memberId: string;
   nickname: string;
+  /** Always `''`: records no longer follow challenges; the field keeps the old shape. */
   challengeId: string;
 }
 
-/** Strictly lower wins; an equal value keeps the earlier row (candidates arrive oldest first). */
-const UPSERT_RECORD = `
-  INSERT INTO records
-    (game_id, params_key, value, challenge_id, member_id, nickname, facts_json, submitted_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT (game_id, params_key) DO UPDATE SET
-    value = excluded.value, challenge_id = excluded.challenge_id,
-    member_id = excluded.member_id, nickname = excluded.nickname,
-    facts_json = excluded.facts_json, submitted_at = excluded.submitted_at
-  WHERE excluded.value < records.value`;
+/** One member's personal best in one table (game × mode) — club.md §16. */
+export interface RankingEntryRow {
+  memberId: string;
+  nickname: string;
+  submittedAt: string;
+  facts: unknown;
+  seed: string;
+  boardDigest: string | null;
+}
+
+export interface RankingTableRow {
+  gameId: string;
+  paramsKey: string;
+  entryCount: number;
+  leader: RankingEntryRow;
+}
+
+const directionOf = (gameId: string): Direction => GAME_CONTRACTS[gameId]?.direction ?? 'asc';
+/** `ORDER BY` for a table, best first; ties by earlier submission, then member id. */
+const orderBy = (direction: Direction): string =>
+  `value ${direction === 'asc' ? 'ASC' : 'DESC'}, submitted_at, member_id`;
+const DESC_GAMES = Object.keys(GAME_CONTRACTS).filter(
+  (id) => GAME_CONTRACTS[id]!.direction === 'desc',
+);
 
 const text = (row: Row, key: string): string => String(row[key]);
 const nullableText = (row: Row, key: string): string | null => {
@@ -135,6 +150,15 @@ const toChallenge = (row: Row): ChallengeRow => ({
   createdAt: text(row, 'created_at'),
   resultCount: int(row, 'result_count'),
   mine: int(row, 'mine') === 1,
+});
+
+const toRankingEntry = (row: Row): RankingEntryRow => ({
+  memberId: text(row, 'member_id'),
+  nickname: text(row, 'nickname'),
+  submittedAt: text(row, 'submitted_at'),
+  facts: parseJson(text(row, 'facts_json')),
+  seed: text(row, 'seed'),
+  boardDigest: nullableText(row, 'board_digest'),
 });
 
 const toResult = (row: Row): ResultRow => ({
@@ -395,11 +419,9 @@ export class Store {
       .map(toChallenge);
   }
 
-  /** Soft delete; the game's records are rebuilt from the challenges that remain live. */
+  /** Soft delete. Rankings are personal bests and stand on their own (club.md §16). */
   deleteChallenge(id: string, now: string): void {
-    const row = this.db.get(`SELECT game_id FROM challenges WHERE id = ?`, id);
     this.db.run(`UPDATE challenges SET deleted_at = ? WHERE id = ?`, now, id);
-    if (row !== undefined) this.rebuildRecords(text(row, 'game_id'));
   }
 
   // ---------- results ----------
@@ -443,23 +465,6 @@ export class Store {
       `UPDATE challenges SET result_count = result_count + 1 WHERE id = ?`,
       input.challengeId,
     );
-    if (input.outcome === 'completed') {
-      const challenge = this.db.get(
-        `SELECT game_id, params_json FROM challenges WHERE id = ?`,
-        input.challengeId,
-      );
-      if (challenge !== undefined) {
-        this.offerRecord({
-          gameId: text(challenge, 'game_id'),
-          params: parseJson(text(challenge, 'params_json')),
-          challengeId: input.challengeId,
-          memberId: input.memberId,
-          nickname: input.nickname,
-          submittedAt: input.now,
-          facts: input.facts,
-        });
-      }
-    }
     return {
       challengeId: input.challengeId,
       memberId: input.memberId,
@@ -470,81 +475,151 @@ export class Store {
     };
   }
 
-  // ---------- records ----------
+  // ---------- rankings (club.md §16) ----------
 
-  /** Ordered by game, then mode — the response order of `GET /records`. */
-  records(): RecordRow[] {
-    return this.db.all(`SELECT * FROM records ORDER BY game_id, params_key`).map((row) => ({
-      gameId: text(row, 'game_id'),
-      paramsKey: text(row, 'params_key'),
-      facts: parseJson(text(row, 'facts_json')),
-      memberId: text(row, 'member_id'),
-      nickname: text(row, 'nickname'),
-      challengeId: text(row, 'challenge_id'),
-    }));
+  rankingEntry(gameId: string, paramsKey: string, memberId: string): RankingEntryRow | null {
+    const row = this.db.get(
+      `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+      gameId,
+      paramsKey,
+      memberId,
+    );
+    return row === undefined ? null : toRankingEntry(row);
   }
 
   /**
-   * Derives the records of one game (or all, with null) from the completed
-   * results of live challenges, oldest first, so ties keep the earlier result.
-   * The same derivation the table is kept by incrementally in `addResult`.
+   * Stores a completed result as the member's row when the table has none of
+   * theirs or this one is STRICTLY better (an equal value keeps the earlier
+   * row). Returns whether the table changed.
    */
-  rebuildRecords(gameId: string | null): void {
-    if (gameId === null) this.db.run(`DELETE FROM records`);
-    else this.db.run(`DELETE FROM records WHERE game_id = ?`, gameId);
-    const rows =
-      gameId === null
-        ? this.db.all(COMPLETED_FOR_RECORDS)
-        : this.db.all(
-            COMPLETED_FOR_RECORDS.replace('ORDER BY', 'AND c.game_id = ? ORDER BY'),
-            gameId,
-          );
-    for (const row of rows) {
-      this.offerRecord({
-        gameId: text(row, 'game_id'),
-        params: parseJson(text(row, 'params_json')),
-        challengeId: text(row, 'challenge_id'),
-        memberId: text(row, 'member_id'),
-        nickname: text(row, 'nickname'),
-        submittedAt: text(row, 'submitted_at'),
-        facts: parseJson(text(row, 'facts_json')),
-      });
-    }
-  }
-
-  /** A game the server does not know, or facts without the axis, never make a record. */
-  private offerRecord(c: {
+  offerRanking(input: {
     gameId: string;
-    params: unknown;
-    challengeId: string;
+    paramsKey: string;
     memberId: string;
     nickname: string;
-    submittedAt: string;
+    value: number;
     facts: unknown;
-  }): void {
-    const contract = GAME_CONTRACTS[c.gameId];
-    if (contract === undefined) return;
-    const paramsKey = contract.paramsKey(c.params);
-    const value = axisValue(contract, c.facts);
-    if (paramsKey === null || value === null) return;
-    this.db.run(
-      UPSERT_RECORD,
-      c.gameId,
-      paramsKey,
-      value,
-      c.challengeId,
-      c.memberId,
-      c.nickname,
-      JSON.stringify(c.facts),
-      c.submittedAt,
+    seed: string;
+    boardDigest: string | null;
+    now: string;
+  }): boolean {
+    const existing = this.db.get(
+      `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+      input.gameId,
+      input.paramsKey,
+      input.memberId,
     );
+    if (existing !== undefined) {
+      const before = Number(existing.value);
+      const better =
+        directionOf(input.gameId) === 'asc' ? input.value < before : input.value > before;
+      if (!better) return false;
+    }
+    this.db.run(
+      `INSERT INTO ranking_entries
+         (game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (game_id, params_key, member_id) DO UPDATE SET
+         nickname = excluded.nickname, value = excluded.value, facts_json = excluded.facts_json,
+         seed = excluded.seed, board_digest = excluded.board_digest,
+         submitted_at = excluded.submitted_at`,
+      input.gameId,
+      input.paramsKey,
+      input.memberId,
+      input.nickname,
+      input.value,
+      JSON.stringify(input.facts),
+      input.seed,
+      input.boardDigest,
+      input.now,
+    );
+    return true;
+  }
+
+  rankingCount(gameId: string, paramsKey: string): number {
+    const row = this.db.get(
+      `SELECT COUNT(*) AS n FROM ranking_entries WHERE game_id = ? AND params_key = ?`,
+      gameId,
+      paramsKey,
+    );
+    return row === undefined ? 0 : int(row, 'n');
+  }
+
+  /** 1 + the rows that are better, or equal and earlier — the order `rankingTop` lists in. */
+  rankOf(gameId: string, paramsKey: string, memberId: string): number | null {
+    const mine = this.db.get(
+      `SELECT value, submitted_at FROM ranking_entries
+       WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+      gameId,
+      paramsKey,
+      memberId,
+    );
+    if (mine === undefined) return null;
+    const better = directionOf(gameId) === 'asc' ? '<' : '>';
+    const row = this.db.get(
+      `SELECT COUNT(*) AS n FROM ranking_entries
+       WHERE game_id = ? AND params_key = ? AND (value ${better} ?
+         OR (value = ? AND (submitted_at < ? OR (submitted_at = ? AND member_id < ?))))`,
+      gameId,
+      paramsKey,
+      Number(mine.value),
+      Number(mine.value),
+      text(mine, 'submitted_at'),
+      text(mine, 'submitted_at'),
+      memberId,
+    );
+    return (row === undefined ? 0 : int(row, 'n')) + 1;
+  }
+
+  /** The best `limit` rows of a table, in rank order. */
+  rankingTop(gameId: string, paramsKey: string, limit: number): RankingEntryRow[] {
+    return this.db
+      .all(
+        `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ?
+         ORDER BY ${orderBy(directionOf(gameId))} LIMIT ?`,
+        gameId,
+        paramsKey,
+        limit,
+      )
+      .map(toRankingEntry);
+  }
+
+  /**
+   * One row per table with its leader, picked by SQL: a window function ranks
+   * rows inside each table, so no table is read into application code. A
+   * `desc` game's value is negated for the ordering only.
+   */
+  rankingTables(): RankingTableRow[] {
+    const marks = DESC_GAMES.map(() => '?').join(', ');
+    const signed = `(CASE WHEN game_id IN (${marks}) THEN -value ELSE value END)`;
+    return this.db
+      .all(
+        `SELECT * FROM (
+           SELECT *,
+             ROW_NUMBER() OVER (PARTITION BY game_id, params_key
+               ORDER BY ${signed}, submitted_at, member_id) AS rn,
+             COUNT(*) OVER (PARTITION BY game_id, params_key) AS n
+           FROM ranking_entries
+         ) WHERE rn = 1 ORDER BY game_id, params_key`,
+        ...DESC_GAMES,
+      )
+      .map((row) => ({
+        gameId: text(row, 'game_id'),
+        paramsKey: text(row, 'params_key'),
+        entryCount: int(row, 'n'),
+        leader: toRankingEntry(row),
+      }));
+  }
+
+  /** `GET /records`: the leaders of the rankings in the old shape (club.md §16-1). */
+  records(): RecordRow[] {
+    return this.rankingTables().map((table) => ({
+      gameId: table.gameId,
+      paramsKey: table.paramsKey,
+      facts: table.leader.facts,
+      memberId: table.leader.memberId,
+      nickname: table.leader.nickname,
+      challengeId: '',
+    }));
   }
 }
-
-const COMPLETED_FOR_RECORDS = `
-  SELECT r.challenge_id, r.member_id, r.nickname, r.submitted_at, r.facts_json,
-         c.game_id, c.params_json
-  FROM results r
-  JOIN challenges c ON c.id = r.challenge_id
-  WHERE r.outcome = 'completed' AND c.deleted_at IS NULL
-  ORDER BY r.seq`;
