@@ -97,6 +97,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .map((origin) => stripSlash(origin.trim()))
       .filter((origin) => origin !== ''),
     hosting: hostingFrom(env),
+    openJoin: env.CLUB_OPEN_JOIN === '1',
     trustProxy: env.CLUB_TRUST_PROXY !== '0',
     log: env.CLUB_LOG !== '0',
   };

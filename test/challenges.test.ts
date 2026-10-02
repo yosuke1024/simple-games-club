@@ -35,6 +35,7 @@ describe('POST /api/v1/challenges (club.md §5-4, §6-3)', () => {
       seed: 'sudoku-free-mf8k2a-1x9q',
       boardDigest: 'sd1:9f3a1c07',
       title: null,
+      daily: null,
       createdBy: { id: owner.memberId, nickname: 'Yoh' },
       createdAt: expect.any(String),
       resultCount: 1,
@@ -55,9 +56,11 @@ describe('POST /api/v1/challenges (club.md §5-4, §6-3)', () => {
   });
 
   it('keeps a title when given one, empty included', async () => {
-    expect((await create(owner, { title: 'Friday puzzle' })).json.title).toBe('Friday puzzle');
-    expect((await create(owner, { title: '' })).json.title).toBe('');
-    expect((await create(owner, { title: 'x'.repeat(61) })).status).toBe(400);
+    expect((await create(owner, { title: 'Friday puzzle', seed: 't1' })).json.title).toBe(
+      'Friday puzzle',
+    );
+    expect((await create(owner, { title: '', seed: 't2' })).json.title).toBe('');
+    expect((await create(owner, { title: 'x'.repeat(61), seed: 't3' })).status).toBe(400);
   });
 
   it('answers 501 for a contract version it does not know', async () => {
@@ -118,7 +121,7 @@ describe('DELETE /api/v1/challenges/:id (club.md §5-3)', () => {
     });
     expect(byMember.status).toBe(403);
 
-    const mine = (await create(member)).json.id;
+    const mine = (await create(member, { seed: 'own-board' })).json.id;
     expect(
       (await server.api(`/api/v1/challenges/${mine}`, { method: 'DELETE', token: member.token }))
         .status,
@@ -224,5 +227,107 @@ describe('POST /api/v1/challenges/:id/results (club.md §5-4)', () => {
     expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Yoh', 'Ken']);
     const club = await server.api('/api/v1/club', { token: owner.token });
     expect(club.json.members.map((m: { nickname: string }) => m.nickname)).toEqual(['Yoh']);
+  });
+});
+
+describe('one challenge per board (club.md §6-3)', () => {
+  it('adds a second sender to the live challenge instead of creating a twin', async () => {
+    const first = await create(owner, { title: 'First' });
+    expect(first.status).toBe(201);
+    const second = await create(member, {
+      title: 'Second',
+      result: { outcome: 'completed', facts: { elapsedSeconds: 200 } },
+    });
+    expect(second.status).toBe(200);
+    expect(second.json.id).toBe(first.json.id);
+    expect(second.json.resultCount).toBe(2);
+    expect(second.json.mine).toBe(true);
+    expect(second.json.title).toBe('First');
+    const asOwner = await server.api(`/api/v1/challenges/${first.json.id}`, { token: owner.token });
+    expect(asOwner.json.resultCount).toBe(2);
+    expect(asOwner.json.mine).toBe(true);
+    const results = await server.api(`/api/v1/challenges/${first.json.id}/results`, {
+      token: owner.token,
+    });
+    expect(results.json.map((r: { memberId: string }) => r.memberId)).toEqual([
+      owner.memberId,
+      member.memberId,
+    ]);
+    const list = await server.api('/api/v1/challenges', { token: owner.token });
+    expect(list.json).toHaveLength(1);
+  });
+
+  it('refuses the same member sending the same board twice, storing nothing', async () => {
+    await create(owner);
+    const again = await create(owner);
+    expect(again.status).toBe(409);
+    expect(again.json.error.code).toBe('already_submitted');
+    const list = await server.api('/api/v1/challenges', { token: owner.token });
+    expect(list.json[0].resultCount).toBe(1);
+  });
+
+  it('allows the board again once its challenge is deleted', async () => {
+    const first = await create(owner);
+    await server.api(`/api/v1/challenges/${first.json.id}`, {
+      method: 'DELETE',
+      token: owner.token,
+    });
+    const again = await create(owner);
+    expect(again.status).toBe(201);
+    expect(again.json.id).not.toBe(first.json.id);
+  });
+});
+
+describe('the daily tag', () => {
+  it('is stored, returned, and null by default', async () => {
+    expect((await create(owner)).json.daily).toBeNull();
+    const tagged = await create(owner, { seed: 'd1', daily: '2026-10-02' });
+    expect(tagged.status).toBe(201);
+    expect(tagged.json.daily).toBe('2026-10-02');
+    const read = await server.api(`/api/v1/challenges/${tagged.json.id}`, { token: member.token });
+    expect(read.json.daily).toBe('2026-10-02');
+    expect((await create(owner, { seed: 'd2', daily: null })).json.daily).toBeNull();
+  });
+
+  it('rejects anything that is not a real calendar date', async () => {
+    for (const daily of ['2026-13-40', 'abc', '2026-02-30', 20261002]) {
+      const reply = await create(owner, { seed: 'bad', daily });
+      expect(reply.status).toBe(400);
+      expect(reply.json.error.code).toBe('invalid_request');
+    }
+  });
+
+  it("keeps the first sender's tag on a deduped challenge", async () => {
+    await create(owner, { daily: '2026-10-02' });
+    const joined = await create(member, { daily: '2026-10-03' });
+    expect(joined.status).toBe(200);
+    expect(joined.json.daily).toBe('2026-10-02');
+  });
+
+  it('filters the list with ?daily= and pages within a date', async () => {
+    const ids: string[] = [];
+    for (const [seed, daily] of [
+      ['a', '2026-10-01'],
+      ['b', '2026-10-02'],
+      ['c', '2026-10-01'],
+      ['d', '2026-10-02'],
+      ['e', '2026-10-01'],
+    ] as const) {
+      ids.push((await create(owner, { seed, daily })).json.id);
+    }
+    const day1 = await server.api('/api/v1/challenges?daily=2026-10-01', { token: member.token });
+    expect(day1.json.map((c: { id: string }) => c.id)).toEqual([ids[4], ids[2], ids[0]]);
+    const day2 = await server.api('/api/v1/challenges?daily=2026-10-02', { token: member.token });
+    expect(day2.json.map((c: { id: string }) => c.id)).toEqual([ids[3], ids[1]]);
+    const paged = await server.api(`/api/v1/challenges?daily=2026-10-01&after=${ids[4]}`, {
+      token: member.token,
+    });
+    expect(paged.json.map((c: { id: string }) => c.id)).toEqual([ids[2], ids[0]]);
+    const none = await server.api('/api/v1/challenges?daily=2026-10-09', { token: member.token });
+    expect(none.json).toEqual([]);
+    const all = await server.api('/api/v1/challenges', { token: member.token });
+    expect(all.json).toHaveLength(5);
+    const bad = await server.api('/api/v1/challenges?daily=abc', { token: member.token });
+    expect(bad.status).toBe(400);
   });
 });

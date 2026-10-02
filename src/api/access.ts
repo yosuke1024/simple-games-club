@@ -11,7 +11,7 @@ import {
   randomToken,
   safeEqual,
 } from '../auth/tokens.js';
-import { conflict, notFound } from '../http/errors.js';
+import { conflict, invalidRequest, notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
@@ -77,13 +77,34 @@ export function registerAccess(router: Router, deps: Deps): void {
 
   router.add('POST', '/api/v1/join', { auth: 'none', limit: 'ip' }, async (ctx) => {
     const body = await ctx.body();
-    const inviteToken = v.secretField(body.inviteToken, 'inviteToken');
+    // The token is optional only where anyone may join (CLUB_OPEN_JOIN).
+    const tokenAbsent = body.inviteToken === undefined || body.inviteToken === null;
+    if (tokenAbsent && !config.openJoin) throw invalidRequest('inviteToken is required');
+    const inviteToken = tokenAbsent ? null : v.secretField(body.inviteToken, 'inviteToken');
     const nickname = v.nickname(body.nickname);
 
     const club = store.getClub();
     if (club === null) throw notFound('this server has not been claimed yet');
 
     const nowIso = iso(ctx.now);
+    if (inviteToken === null) {
+      if (store.countActive() >= limits.maxMembers) {
+        throw conflict('too_many_members', `a club has at most ${limits.maxMembers} members`);
+      }
+      const openToken = randomToken(MEMBER_TOKEN_BYTES);
+      const joined = store.createMember(
+        newId('m'),
+        nickname,
+        'member',
+        hashToken(config.secret, openToken),
+        nowIso,
+      );
+      store.touchActivity(nowIso);
+      return {
+        status: 201,
+        body: { club: clubShape(club), member: memberShape(joined), memberToken: openToken },
+      };
+    }
     const invite = store.inviteByTokenHash(hashToken(config.secret, inviteToken));
     const usable =
       invite !== null &&

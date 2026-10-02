@@ -26,6 +26,7 @@ export const challengeShape = (challenge: ChallengeRow) => ({
   seed: challenge.seed,
   boardDigest: challenge.boardDigest,
   title: challenge.title,
+  daily: challenge.daily,
   createdBy: challenge.createdBy,
   createdAt: challenge.createdAt,
   resultCount: challenge.resultCount,

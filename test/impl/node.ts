@@ -27,6 +27,7 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
       publicOrigin: options.publicOrigin,
       corsOrigins: options.corsOrigins,
       hosting: options.hosting,
+      openJoin: options.openJoin,
       trustProxy: true,
       log: false,
     };

@@ -21,6 +21,8 @@ export interface Env {
   CLUB_HOSTING_MANAGE_URL?: string;
   /** `1` to read `X-Forwarded-*` instead of what Cloudflare itself sets. Off by default. */
   CLUB_TRUST_PROXY?: string;
+  /** `1` lets `POST /join` take a nickname alone (the Public deployment). */
+  CLUB_OPEN_JOIN?: string;
   /** A JSON object overriding entries of `DEFAULT_LIMITS` (tests; a deployment that needs other numbers). */
   CLUB_LIMITS?: string;
   /**
@@ -87,5 +89,6 @@ export function apiConfigFrom(env: Env, secret: string): ApiConfig {
       .map((origin) => stripSlash(origin.trim()))
       .filter((origin) => origin !== ''),
     hosting,
+    openJoin: env.CLUB_OPEN_JOIN === '1',
   };
 }

@@ -7,6 +7,7 @@
  * a script with no bindings (the schema); the other three take bindings.
  */
 import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { Store } from './store.js';
 
 export type SqlValue = string | number | null;
 /** A row as the engine hands it back; the store narrows each column itself. */
@@ -19,7 +20,7 @@ export interface SqlDriver {
   all(sql: string, ...params: SqlValue[]): Row[];
 }
 
-/** Creates the tables on first use and refuses a database written by a newer server. */
+/** Creates the tables on first use, upgrades an older database, and refuses a newer one. */
 export function migrate(db: SqlDriver): void {
   db.exec(SCHEMA_SQL);
   const row = db.get(`SELECT value FROM meta WHERE key = 'schema_version'`);
@@ -35,4 +36,26 @@ export function migrate(db: SqlDriver): void {
       `database schema ${stored} is newer than this server (${SCHEMA_VERSION}); upgrade the server`,
     );
   }
+  if (stored < 2) upgradeToV2(db);
+}
+
+/**
+ * v1 → v2. SCHEMA_SQL above has already created `records` and the board index
+ * (both IF NOT EXISTS); what an old `challenges` table lacks is added here,
+ * checked first so a run that stopped half-way can simply run again.
+ */
+function upgradeToV2(db: SqlDriver): void {
+  const have = new Set(
+    db.all(`PRAGMA table_info(challenges)`).map((column) => String(column.name)),
+  );
+  if (!have.has('daily')) db.exec(`ALTER TABLE challenges ADD COLUMN daily TEXT`);
+  if (!have.has('result_count')) {
+    db.exec(`ALTER TABLE challenges ADD COLUMN result_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  db.run(
+    `UPDATE challenges SET result_count =
+       (SELECT COUNT(*) FROM results r WHERE r.challenge_id = challenges.id)`,
+  );
+  new Store(db).rebuildRecords(null);
+  db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
 }

@@ -143,6 +143,23 @@ nothing; for one room with the world in it, it is the cost driver. Both are
 implementation choices inside the contract (club.md §0「決めないこと」), fixable by
 keeping counts and records as rows instead of recomputing them.
 
+**Fixed in plan PR C (2026-10-02).** `challenges.result_count` is kept on every result and
+`records` is a table kept on every completed result (schema v2; a v1 database is upgraded
+when the server opens it). The same local run (`scripts/measure-rows.mjs` in Miniflare)
+before and after:
+
+| Step                                        | Rows read before | Rows read after |
+| ------------------------------------------- | ---------------: | --------------: |
+| `GET /challenges`, 10 challenges            |              240 |              31 |
+| `GET /records`, 10 challenges / 191 results |              401 |               2 |
+| `GET /challenges/:id/results`, 20 results   |               66 |              45 |
+
+Writes rise by the bookkeeping: `POST /challenges` 7 → 11 rows written, `POST
+/challenges/:id/results` 4 → 5. The list now costs about three rows per listed challenge
+(the row, the creator's name, the viewer's own-result probe) and the records read two rows
+whatever the club's size. §7's production numbers predate this change; measuring it in
+production is plan PR F's.
+
 ## 4. Where the free plan's ceilings fall (arithmetic, not a forecast)
 
 These are counts, derived from §2 and §3. They say how much use fits in a day, not what

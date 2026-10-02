@@ -11,12 +11,18 @@ describe('GET /api/v1/health (club.md §5-3)', () => {
   it('answers without auth, names the API version, and says whether the server is claimed', async () => {
     const before = await server.api('/api/v1/health');
     expect(before.status).toBe(200);
-    expect(before.json).toEqual({ ok: true, api: 1, claimed: false });
+    expect(before.json).toEqual({ ok: true, api: 1, claimed: false, open: false });
     expect(before.headers.get('x-club-api')).toBe('1');
 
     await claimOwner(server);
     const after = await server.api('/api/v1/health');
-    expect(after.json).toEqual({ ok: true, api: 1, claimed: true });
+    expect(after.json).toEqual({ ok: true, api: 1, claimed: true, open: false });
+  });
+
+  it('says whether anyone may join without an invite', async () => {
+    expect((await server.api('/api/v1/health')).json.open).toBe(false);
+    await server.reopen({ openJoin: true });
+    expect((await server.api('/api/v1/health')).json.open).toBe(true);
   });
 
   it('never caches API answers', async () => {

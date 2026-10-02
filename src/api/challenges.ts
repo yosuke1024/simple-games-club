@@ -16,7 +16,8 @@ export function registerChallenges(router: Router, deps: Deps): void {
 
   router.add('GET', '/api/v1/challenges', { auth: 'member', limit: 'member' }, (ctx) => {
     const after = ctx.query.get('after');
-    const rows = store.listChallenges(ctx.member!.id, after, limits.challengePage);
+    const daily = ctx.query.has('daily') ? v.dailyQuery(ctx.query.get('daily')) : null;
+    const rows = store.listChallenges(ctx.member!.id, after, limits.challengePage, daily);
     return { status: 200, body: rows.map(challengeShape) };
   });
 
@@ -30,11 +31,35 @@ export function registerChallenges(router: Router, deps: Deps): void {
     const seed = v.seed(body.seed);
     const boardDigest = v.boardDigest(body.boardDigest);
     const title = v.title(body.title);
+    const daily = v.daily(body.daily);
     const result = v.smallObject(body.result, 'result', limits.bodyBytes);
     const outcome = v.outcome(result.outcome);
     const facts = v.smallObject(result.facts, 'result.facts', limits.smallJsonBytes);
 
     const now = iso(ctx.now);
+
+    // One challenge per board (club.md §6-3): a live challenge on the same
+    // game, seed and board takes this result instead of a twin being made. It
+    // keeps the first sender's title and daily tag.
+    const existing = store.liveChallengeOnBoard(gameId, seed, boardDigest, member.id);
+    if (existing !== null) {
+      if (store.hasResult(existing.id, member.id)) {
+        throw conflict('already_submitted', 'one result per member per challenge');
+      }
+      store.addResult({
+        challengeId: existing.id,
+        memberId: member.id,
+        nickname: member.nickname,
+        now,
+        outcome,
+        facts,
+      });
+      store.touchActivity(now);
+      const joined = store.challengeById(existing.id, member.id);
+      if (joined === null) throw notFound('challenge vanished'); // unreachable
+      return { status: 200, body: challengeShape(joined) };
+    }
+
     const id = newId('ch');
     store.createChallenge({
       id,
@@ -44,6 +69,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
       seed,
       boardDigest,
       title,
+      daily,
       createdBy: member.id,
       now,
     });
