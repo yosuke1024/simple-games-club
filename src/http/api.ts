@@ -15,6 +15,7 @@ import { registerHealth } from '../api/health.js';
 import { registerHosting } from '../api/hosting.js';
 import { registerInvites } from '../api/invites.js';
 import { registerMembers } from '../api/members.js';
+import { registerPublic } from '../api/public.js';
 import { registerRankings } from '../api/rankings.js';
 import { registerRecords } from '../api/records.js';
 import { bearerToken, hashToken } from '../auth/tokens.js';
@@ -80,6 +81,7 @@ export function createApi(options: ApiOptions): Api {
   registerHosting(router, deps);
   registerInvites(router, deps);
   registerMembers(router, deps);
+  registerPublic(router, deps);
 
   // In memory, per process — or per Durable Object, which is one process for
   // its club. A restart forgets the last minute; nothing worse.
@@ -132,7 +134,7 @@ export function createApi(options: ApiOptions): Api {
         now: request.now,
       };
       const reply = await route.handler(ctx);
-      return json(headers, reply.status, reply.body);
+      return json({ ...headers, ...reply.headers }, reply.status, reply.body);
     } catch (error) {
       if (error instanceof ApiError) {
         return json(headers, error.status, { error: { code: error.code, message: error.message } });

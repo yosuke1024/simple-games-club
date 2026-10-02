@@ -54,7 +54,14 @@ pnpm exec wrangler deploy                      # creates the object namespace (S
 pnpm exec wrangler secret put CLUB_SETUP_KEY   # claims the club once (below)
 ```
 
-`wrangler.toml` carries the rest. The web build goes in `web/` and is served
+`wrangler.toml` carries the rest — among it `CLUB_OBJECT_NAME`, the name of the
+Durable Object the deployment talks to. A new name is a new, empty club; the old
+object stays where it is, unreferenced (club.md §17-4). After deploying a new name,
+claim it with `node scripts/claim-public.mjs [nickname]`: it reads the setup key from
+`data/cloudflare-spike.setup-key` (or `CLUB_SETUP_KEY`), claims `CLUB_URL` (default
+`https://club.pixapps.ai`) as `PixApps Club`, prints the club and member ids (never the
+token) and saves `{ url, claimedAt, owner }` to `data/public.session.json` (gitignored).
+The web build goes in `web/` and is served
 as static assets, free of request charges; only the API and the entry pages
 run the Worker. `CLUB_SECRET` is optional here too — without it the object
 generates one into its own storage.
@@ -125,6 +132,7 @@ meaning on Workers (there is no port, no directory, no proxy in front).
 | `CLUB_HOSTING_MANAGE_URL` | derived on Railway    | The provider dashboard, shown to owners only                                                                              |
 | `CLUB_TRUST_PROXY`        | `1` Node, `0` Workers | Read `X-Forwarded-*` instead of the connection (Node: every PaaS sets them; Workers: Cloudflare already names the client) |
 | `CLUB_OPEN_JOIN`          | —                     | `1` lets `POST /join` take a nickname alone (the Public deployment); unset, an invite token is required (a Private one)   |
+| `CLUB_OBJECT_NAME`        | `club`                | _Workers._ The Durable Object's name (`idFromName`). A new name starts a fresh club; `wrangler.toml` sets `club-2026-10`  |
 | `CLUB_LIMITS`             | —                     | _Workers._ A JSON object overriding entries of `src/limits.ts` for one deployment                                         |
 | `CLUB_LOG`                | `1`                   | _Node._ `0` silences the one-line request log                                                                             |
 
@@ -153,7 +161,7 @@ under `test/` send its example JSON verbatim. In one screen:
 GET    /api/v1/health                        no auth       { ok, api: 1, claimed, open }
 POST   /api/v1/claim                         setup key     { setupKey, nickname, clubName? } → { club, member, memberToken }
 POST   /api/v1/join                          invite token  { nickname, inviteToken? }       → { club, member, memberToken }
-GET    /api/v1/club                          member        { club, me, members[] }
+GET    /api/v1/club                          member        { club, me, memberCount, members[] } — members: the newest 50 (`membersPage`), newest first; memberCount: all active members
 PATCH  /api/v1/club                          owner         { name }
 GET    /api/v1/challenges[?after=<id>][&daily=YYYY-MM-DD]  member  Challenge[]  (newest first, 50)
 POST   /api/v1/challenges                    member        challenge + the creator's result, daily? → Challenge (201; 200 with the existing one when a live challenge has the same gameId + seed + boardDigest)
@@ -169,7 +177,11 @@ GET    /api/v1/hosting                       member        { provider, manageUrl
 PATCH  /api/v1/hosting                       owner         { referralUrl | null }
 GET    /api/v1/invite                        owner         { token, url }
 POST   /api/v1/invite                        owner         { role: 'member' } rotates · { role: 'owner' } one-use link, 24h
-DELETE /api/v1/members/:id                   owner         204; never the last owner
+DELETE /api/v1/members/:id[?purge=1]         owner         204; never the last owner. purge=1 also deletes their results (challenge resultCount follows), ranking rows (table count and leader follow) and reports; without it their results stay under their name
+PATCH  /api/v1/members/:id                   owner         { nickname } → Member; renames their results and ranking rows too and clears the reports against them
+POST   /api/v1/members/:id/report            member        204; one report per reporter, a second changes nothing; 400 on yourself, 404 on an unknown or removed member
+GET    /api/v1/members/reported              owner         [{ member, reportCount }] — most reported first, then the oldest member
+GET    /api/v1/public[?date=YYYY-MM-DD]      no auth       { club: { name }, memberCount, today: [{ gameId, daily, resultCount, top: [{ nickname, facts }] }], rankings: [{ gameId, paramsKey, entryCount, leader: { nickname, facts } }] } — 404 unless CLUB_OPEN_JOIN; Cache-Control: public, max-age=300 (the Worker caches it 5 minutes)
 ```
 
 Every response carries `X-Club-Api: 1`. Errors are
@@ -191,8 +203,16 @@ Points the implementation settles within the contract:
   there has challenges and results but no rankings until the server learns it.
   A ranking table holds one row per member — their personal best, replaced only
   by a strictly better completed result — and records are those tables' leaders.
+- A `nickname` (claim, join, rename) is NFC-normalized, trimmed, runs of whitespace
+  collapsed, must hold at least one letter or number and no control, format,
+  private-use, surrogate or unassigned code point, and is 1..24 code points (club.md §17-1).
+- `GET /public` is the landing page's excerpt (club.md §18): the top three completed
+  results of each challenge tagged with that `daily`, ordered by the game's axis from
+  `src/contracts/games.ts` (a game it does not know lists no `top`), and the rankings'
+  leaders — names and facts, no member ids. `date` defaults to the request clock's UTC
+  day. It is the only route that sends `Cache-Control: public`; every other response is `no-store`.
 - Limits: 5 owners and 100 members per club, 10 join/claim attempts per IP per
-  minute, 60 requests per member per minute, 16KB per request, 1KB per
+  minute, 60 requests per member per minute, `GET /club` lists the newest 50 members (`membersPage`), 16KB per request, 1KB per
   `params` and per `facts`, rankings top 50 (at most 100), rank scan ceiling `rankingRankScan` 1000.
 
 ## What is stored, what is logged

@@ -81,6 +81,25 @@ export interface RankingEntryRow {
   boardDigest: string | null;
 }
 
+/** A challenge as the public view reads it: no viewer, no creator. */
+export interface DailyChallengeRow {
+  id: string;
+  gameId: string;
+  daily: string;
+  resultCount: number;
+}
+
+/** One of a challenge's best completed results — a name and its facts, nothing that identifies a member. */
+export interface TopResultRow {
+  nickname: string;
+  facts: unknown;
+}
+
+export interface ReportedMemberRow {
+  member: MemberRow;
+  reportCount: number;
+}
+
 export interface RankingTableRow {
   gameId: string;
   paramsKey: string;
@@ -210,8 +229,11 @@ export class Store {
 
   // ---------- members ----------
 
-  activeMembers(): MemberRow[] {
-    return this.db.all(`SELECT * FROM members WHERE revoked_at IS NULL ORDER BY seq`).map(toMember);
+  /** The newest `limit` active members (club.md §17-2). */
+  newestMembers(limit: number): MemberRow[] {
+    return this.db
+      .all(`SELECT * FROM members WHERE revoked_at IS NULL ORDER BY seq DESC LIMIT ?`, limit)
+      .map(toMember);
   }
 
   memberById(id: string): MemberRow | null {
@@ -259,6 +281,116 @@ export class Store {
 
   revokeMember(id: string, now: string): void {
     this.db.run(`UPDATE members SET revoked_at = ? WHERE id = ?`, now, id);
+  }
+
+  /**
+   * The owner's remedy of renaming (club.md §17-3): the member's name, and the
+   * name carried on their results and ranking rows. The report rows go with it —
+   * the remedy has been applied.
+   */
+  renameMember(id: string, nickname: string): void {
+    this.db.run(`UPDATE members SET nickname = ? WHERE id = ?`, nickname, id);
+    this.db.run(`UPDATE results SET nickname = ? WHERE member_id = ?`, nickname, id);
+    this.db.run(`UPDATE ranking_entries SET nickname = ? WHERE member_id = ?`, nickname, id);
+    this.clearReports(id);
+  }
+
+  /**
+   * The owner's remedy of removing with the work (club.md §17-3): the member's
+   * results (and their challenges' `result_count`), their ranking rows (and each
+   * table's summary row: count, leader), and the reports against them. Call
+   * `revokeMember` as well; this does not.
+   */
+  purgeMember(id: string): void {
+    this.db.run(
+      `UPDATE challenges SET result_count = result_count - 1
+       WHERE id IN (SELECT challenge_id FROM results WHERE member_id = ?)`,
+      id,
+    );
+    this.db.run(`DELETE FROM results WHERE member_id = ?`, id);
+
+    const tables = this.db.all(
+      `SELECT game_id, params_key FROM ranking_entries WHERE member_id = ?`,
+      id,
+    );
+    this.db.run(`DELETE FROM ranking_entries WHERE member_id = ?`, id);
+    for (const table of tables) {
+      const gameId = text(table, 'game_id');
+      const paramsKey = text(table, 'params_key');
+      const summary = this.db.get(
+        `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+        gameId,
+        paramsKey,
+      );
+      if (summary === undefined) continue;
+      const count = int(summary, 'entry_count') - 1;
+      if (count <= 0) {
+        this.db.run(
+          `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+          gameId,
+          paramsKey,
+        );
+        continue;
+      }
+      let leader = text(summary, 'leader_member_id');
+      if (leader === id) {
+        const next = this.db.get(
+          `SELECT member_id FROM ranking_entries WHERE game_id = ? AND params_key = ?
+           ORDER BY ${orderBy(directionOf(gameId))} LIMIT 1`,
+          gameId,
+          paramsKey,
+        );
+        // Out of step with the entries (cannot happen): the table is empty after all.
+        if (next === undefined) {
+          this.db.run(
+            `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+            gameId,
+            paramsKey,
+          );
+          continue;
+        }
+        leader = text(next, 'member_id');
+      }
+      this.db.run(
+        `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
+         WHERE game_id = ? AND params_key = ?`,
+        count,
+        leader,
+        gameId,
+        paramsKey,
+      );
+    }
+    this.clearReports(id);
+  }
+
+  // ---------- reports (club.md §17-3) ----------
+
+  /** One report per (target, reporter); a second one changes nothing. */
+  addReport(targetId: string, reporterId: string, now: string): void {
+    this.db.run(
+      `INSERT INTO reports (target_id, reporter_id, created_at) VALUES (?, ?, ?)
+       ON CONFLICT (target_id, reporter_id) DO NOTHING`,
+      targetId,
+      reporterId,
+      now,
+    );
+  }
+
+  clearReports(targetId: string): void {
+    this.db.run(`DELETE FROM reports WHERE target_id = ?`, targetId);
+  }
+
+  /** Active members with at least one report: most reported first, then the oldest member. */
+  reportedMembers(): ReportedMemberRow[] {
+    return this.db
+      .all(
+        `SELECT m.*, COUNT(*) AS report_count FROM reports r
+         JOIN members m ON m.id = r.target_id
+         WHERE m.revoked_at IS NULL
+         GROUP BY m.id
+         ORDER BY report_count DESC, m.seq`,
+      )
+      .map((row) => ({ member: toMember(row), reportCount: int(row, 'report_count') }));
   }
 
   // ---------- setup key ----------
@@ -470,6 +602,55 @@ export class Store {
       outcome: input.outcome,
       facts: input.facts,
     };
+  }
+
+  // ---------- the LP's read-only view (club.md §18) ----------
+
+  /** The live challenges tagged with `daily`, oldest first, at most `limit`. */
+  dailyChallenges(daily: string, limit: number): DailyChallengeRow[] {
+    return this.db
+      .all(
+        `SELECT id, game_id, daily, result_count FROM challenges
+         WHERE daily = ? AND deleted_at IS NULL ORDER BY seq LIMIT ?`,
+        daily,
+        limit,
+      )
+      .map((row) => ({
+        id: text(row, 'id'),
+        gameId: text(row, 'game_id'),
+        daily: text(row, 'daily'),
+        resultCount: int(row, 'result_count'),
+      }));
+  }
+
+  /**
+   * A challenge's best `limit` completed results by the game's axis fact
+   * (`order`, from src/contracts/games.ts), earlier submission first on a tie.
+   * The one place the server ranks a Result; SQLite's JSON1 reads the fact, and
+   * a result whose axis is not a number is left out.
+   */
+  topResults(
+    challengeId: string,
+    order: string,
+    direction: Direction,
+    limit: number,
+  ): TopResultRow[] {
+    const axis = `json_extract(facts_json, '$.' || ?)`;
+    return this.db
+      .all(
+        `SELECT nickname, facts_json FROM results
+         WHERE challenge_id = ? AND outcome = 'completed'
+           AND typeof(${axis}) IN ('integer', 'real')
+         ORDER BY ${axis} ${direction === 'asc' ? 'ASC' : 'DESC'}, seq LIMIT ?`,
+        challengeId,
+        order,
+        order,
+        limit,
+      )
+      .map((row) => ({
+        nickname: text(row, 'nickname'),
+        facts: parseJson(text(row, 'facts_json')),
+      }));
   }
 
   // ---------- rankings (club.md §16) ----------

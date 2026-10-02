@@ -11,7 +11,7 @@
  * except the member invite token, which the owner has to be able to read
  * back and hand out again (club.md §5-1), so it is stored as issued.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /*
  * v2 (the Public deployment, club.md §5-4): `challenges.daily` tags a board as
@@ -27,6 +27,10 @@ export const SCHEMA_VERSION = 3;
  * `ranking_tables` is one summary row per table (entry count and leader),
  * kept by `offerRanking`, so a list read costs the number of tables, not of
  * entries (docs/cloudflare.md §4).
+ *
+ * v4 (the Public deployment's operation, club.md §17): `reports` — one row per
+ * (target, reporter), so a member reports another's nickname once — and an
+ * index on `challenges.daily` for the LP's read-only view (§18).
  */
 
 export const SCHEMA_SQL = `
@@ -120,6 +124,13 @@ CREATE TABLE IF NOT EXISTS ranking_tables (
   leader_member_id TEXT NOT NULL,
   PRIMARY KEY (game_id, params_key)
 );
+
+CREATE TABLE IF NOT EXISTS reports (
+  target_id TEXT NOT NULL,
+  reporter_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (target_id, reporter_id)
+);
 `;
 
 /**
@@ -129,4 +140,9 @@ CREATE TABLE IF NOT EXISTS ranking_tables (
 export const RANKING_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS ranking_entries_table
   ON ranking_entries (game_id, params_key, value, seq);
+`;
+
+/** Run by `migrate()` once `challenges.daily` is certain to exist (after upgradeToV2). */
+export const DAILY_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS challenges_daily ON challenges (daily);
 `;
