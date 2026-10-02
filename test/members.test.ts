@@ -175,6 +175,23 @@ describe('POST /api/v1/members/:id/report and GET /api/v1/members/reported (club
     ]);
   });
 
+  it('caps the reported list at membersPage', async () => {
+    await server.reopen({ limits: { membersPage: 2 } });
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    const sam = await joinMember(server, owner, 'Sam', '203.0.113.3');
+    await report(owner, ken.memberId);
+    await report(owner, mai.memberId);
+    await report(owner, sam.memberId);
+    await report(ken, sam.memberId);
+    const list = await server.api('/api/v1/members/reported', { token: owner.token });
+    expect(list.json.map((r: { member: { nickname: string } }) => r.member.nickname)).toEqual([
+      'Sam',
+      'Ken',
+    ]);
+  });
+
   it('refuses a self report (400) and an unknown or removed member (404)', async () => {
     const owner = await claimOwner(server, 'Yoh');
     const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
@@ -207,6 +224,10 @@ describe('POST /api/v1/members/:id/report and GET /api/v1/members/reported (club
       ['Sam', 2],
       ['Ken', 1],
     ]);
+    // A repeat report does not bump the count.
+    await report(owner, ken.memberId);
+    const again = await server.api('/api/v1/members/reported', { token: owner.token });
+    expect(again.json.map((r: { reportCount: number }) => r.reportCount)).toEqual([2, 2, 1]);
     expect((await server.api('/api/v1/members/reported', { token: ken.token })).status).toBe(403);
     // A removed member drops out of the list.
     await server.api(`/api/v1/members/${mai.memberId}`, { method: 'DELETE', token: owner.token });

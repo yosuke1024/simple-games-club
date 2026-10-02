@@ -188,13 +188,39 @@ describe('migrate() from schema 1', () => {
     };
     migrate(d); // a current database…
     d.exec(`DROP TABLE reports`);
+    d.exec(`DROP INDEX members_reported`);
+    d.exec(`ALTER TABLE members DROP COLUMN report_count`);
     d.exec(`DROP INDEX challenges_daily`);
     d.run(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`); // …made to look like v3
+    for (const id of ['a', 'b', 'c']) {
+      d.run(
+        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+        id,
+        id,
+        `h${id}`,
+      );
+    }
+    migrate(d);
+    expect(d.all(`SELECT * FROM reports`)).toEqual([]);
+    expect(d.all(`SELECT id, report_count FROM members ORDER BY id`)).toEqual([
+      { id: 'a', report_count: 0 },
+      { id: 'b', report_count: 0 },
+      { id: 'c', report_count: 0 },
+    ]);
+    // Backfill: reports that exist when the upgrade runs are counted per target.
+    d.run(`INSERT INTO reports VALUES ('a', 'b', 't'), ('a', 'c', 't'), ('b', 'c', 't')`);
+    d.run(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`);
+    d.exec(`UPDATE members SET report_count = 0`);
     migrate(d);
     migrate(d);
     upgradeToV4(d);
+    expect(d.all(`SELECT id, report_count FROM members ORDER BY id`)).toEqual([
+      { id: 'a', report_count: 2 },
+      { id: 'b', report_count: 1 },
+      { id: 'c', report_count: 0 },
+    ]);
     expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('4');
-    expect(d.all(`SELECT * FROM reports`)).toEqual([]);
+    expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'members_reported'`)).toBeDefined();
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'challenges_daily'`)).toBeDefined();
   });
 

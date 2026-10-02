@@ -13,7 +13,7 @@ import { iso, type Deps } from './deps.js';
 import { memberShape } from './shape.js';
 
 export function registerMembers(router: Router, deps: Deps): void {
-  const { store } = deps;
+  const { store, limits } = deps;
 
   const activeMember = (id: string) => {
     const member = store.memberById(id);
@@ -25,7 +25,7 @@ export function registerMembers(router: Router, deps: Deps): void {
   // because the methods differ, but the order keeps the table easy to read.
   router.add('GET', '/api/v1/members/reported', { auth: 'owner', limit: 'member' }, () => ({
     status: 200,
-    body: store.reportedMembers().map((row) => ({
+    body: store.reportedMembers(limits.membersPage).map((row) => ({
       member: memberShape(row.member),
       reportCount: row.reportCount,
     })),

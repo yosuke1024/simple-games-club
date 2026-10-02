@@ -184,4 +184,28 @@ describe('GET /api/v1/public (club.md §18)', () => {
     const cached = process.env.CLUB_IMPL === 'workers';
     expect(second.json.today[0].resultCount).toBe(cached ? 1 : 2);
   });
+
+  it('keys the cache by the resolved date: a request without one after midnight is not the first', async () => {
+    server = await startServer({ openJoin: true });
+    const yoh = await claimOwner(server, 'Yoh');
+    await createDaily(yoh, 'sudoku', 's1', { elapsedSeconds: 300 }, '2026-09-09');
+    await createDaily(yoh, 'hearts', 'h1', { score: 10 }, '2026-09-10');
+    server.clock.now = new Date('2026-09-09T23:59:00.000Z');
+    const first = await server.api('/api/v1/public');
+    server.clock.now = new Date('2026-09-10T00:01:00.000Z');
+    const second = await server.api('/api/v1/public');
+    expect(first.json.today.map((t: { gameId: string }) => t.gameId)).toEqual(['sudoku']);
+    expect(second.json.today.map((t: { gameId: string }) => t.gameId)).toEqual(['hearts']);
+  });
+
+  it('does not serve another object its cached body (Workers)', async () => {
+    server = await startServer({ openJoin: true, objectName: 'club-a' });
+    await claimOwner(server, 'Yoh');
+    const first = await server.api(`/api/v1/public?date=${DAY}`);
+    expect(first.status).toBe(200);
+    await server.reopen({ objectName: 'club-b' });
+    // A new, unclaimed object answers for itself (404), not with club-a's cached 200.
+    const other = await server.api(`/api/v1/public?date=${DAY}`);
+    expect(other.status).toBe(process.env.CLUB_IMPL === 'workers' ? 404 : 200);
+  });
 });

@@ -29,8 +29,10 @@ export const SCHEMA_VERSION = 4;
  * entries (docs/cloudflare.md §4).
  *
  * v4 (the Public deployment's operation, club.md §17): `reports` — one row per
- * (target, reporter), so a member reports another's nickname once — and an
- * index on `challenges.daily` for the LP's read-only view (§18).
+ * (target, reporter), so a member reports another's nickname once, with the
+ * running total kept on `members.report_count` (so the owner's list reads a
+ * page, not the table) — and an index on `challenges.daily` for the LP's
+ * read-only view (§18).
  */
 
 export const SCHEMA_SQL = `
@@ -54,7 +56,8 @@ CREATE TABLE IF NOT EXISTS members (
   role TEXT NOT NULL CHECK (role IN ('owner', 'member')),
   joined_at TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
-  revoked_at TEXT
+  revoked_at TEXT,
+  report_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -145,4 +148,9 @@ CREATE INDEX IF NOT EXISTS ranking_entries_table
 /** Run by `migrate()` once `challenges.daily` is certain to exist (after upgradeToV2). */
 export const DAILY_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS challenges_daily ON challenges (daily);
+`;
+
+/** Run by `migrate()` once `members.report_count` is certain to exist (after upgradeToV4). */
+export const REPORTED_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS members_reported ON members (report_count DESC, seq);
 `;

@@ -367,28 +367,33 @@ export class Store {
 
   /** One report per (target, reporter); a second one changes nothing. */
   addReport(targetId: string, reporterId: string, now: string): void {
+    const seen = this.db.get(
+      `SELECT 1 FROM reports WHERE target_id = ? AND reporter_id = ?`,
+      targetId,
+      reporterId,
+    );
+    if (seen !== undefined) return;
     this.db.run(
-      `INSERT INTO reports (target_id, reporter_id, created_at) VALUES (?, ?, ?)
-       ON CONFLICT (target_id, reporter_id) DO NOTHING`,
+      `INSERT INTO reports (target_id, reporter_id, created_at) VALUES (?, ?, ?)`,
       targetId,
       reporterId,
       now,
     );
+    this.db.run(`UPDATE members SET report_count = report_count + 1 WHERE id = ?`, targetId);
   }
 
   clearReports(targetId: string): void {
     this.db.run(`DELETE FROM reports WHERE target_id = ?`, targetId);
+    this.db.run(`UPDATE members SET report_count = 0 WHERE id = ?`, targetId);
   }
 
   /** Active members with at least one report: most reported first, then the oldest member. */
-  reportedMembers(): ReportedMemberRow[] {
+  reportedMembers(limit: number): ReportedMemberRow[] {
     return this.db
       .all(
-        `SELECT m.*, COUNT(*) AS report_count FROM reports r
-         JOIN members m ON m.id = r.target_id
-         WHERE m.revoked_at IS NULL
-         GROUP BY m.id
-         ORDER BY report_count DESC, m.seq`,
+        `SELECT * FROM members WHERE revoked_at IS NULL AND report_count > 0
+         ORDER BY report_count DESC, seq LIMIT ?`,
+        limit,
       )
       .map((row) => ({ member: toMember(row), reportCount: int(row, 'report_count') }));
   }

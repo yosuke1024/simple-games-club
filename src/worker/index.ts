@@ -101,7 +101,7 @@ async function servePage(request: Request, url: URL, env: Env): Promise<Response
 /**
  * `GET /api/v1/public` is answered from `caches.default` for the five minutes
  * its `Cache-Control` names (club.md §18): a hit never reaches the object. The
- * key is the date and — only for an origin CORS would allow — that origin,
+ * key is the object's name, the date (resolved, never blank) and — only for an origin CORS would allow — that origin,
  * because the cached response carries its `Access-Control-Allow-Origin`; an
  * arbitrary `Origin` header cannot mint keys. Only a 200 is stored.
  */
@@ -113,15 +113,19 @@ async function servePublic(
   settings: WorkerSettings,
   forward: () => Promise<Response>,
 ): Promise<Response> {
-  const date = url.searchParams.get('date');
-  if (date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return forward();
+  const given = url.searchParams.get('date');
+  if (given !== null && !/^\d{4}-\d{2}-\d{2}$/.test(given)) return forward();
+  // No date means "today" on the object's clock: resolved here so the key never
+  // outlives the day it was made for.
+  const date = given ?? requestNow(request, settings.testMode).toISOString().slice(0, 10);
   const origin = request.headers.get('origin');
   const selfUrlOrigin = selfOrigin(request, url, settings);
   const allowed =
     origin !== null &&
     Object.keys(corsHeaders(origin, selfUrlOrigin, apiConfigFrom(env, '').corsOrigins)).length > 0;
+  const objectName = env.CLUB_OBJECT_NAME?.trim() || DEFAULT_OBJECT_NAME;
   const key = new Request(
-    `${url.origin}${url.pathname}?date=${date ?? ''}&origin=${allowed ? encodeURIComponent(origin) : ''}`,
+    `${url.origin}${url.pathname}?object=${encodeURIComponent(objectName)}&date=${date}&origin=${allowed ? encodeURIComponent(origin) : ''}`,
   );
   const cache = caches.default;
   const hit = await cache.match(key);
