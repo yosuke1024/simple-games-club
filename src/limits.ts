@@ -20,6 +20,18 @@ export interface Limits {
   challengePage: number;
   /** `GET /challenges/:id/results`. */
   resultsPage: number;
+  /** `GET /rankings/:gameId/:paramsKey` default rows — club.md §16. */
+  rankingTop: number;
+  /** The most rows `?top=` may ask for. */
+  rankingTopMax: number;
+  /**
+   * How many better rows `rankOf` counts before it gives up and reports the
+   * rank as unknown (`null`). A rank is a count over the index, and every
+   * entry it touches is a row read; the free plan allows 5,000,000 a day
+   * (docs/cloudflare.md §4), so the count stops here instead of growing with
+   * the club. A viewer ranked below this is shown without a number.
+   */
+  rankingRankScan: number;
   /** Owner links — one use, and this long. */
   ownerLinkTtlMs: number;
 }
@@ -33,6 +45,9 @@ export const DEFAULT_LIMITS: Limits = {
   smallJsonBytes: 1024,
   challengePage: 50,
   resultsPage: 200,
+  rankingTop: 50,
+  rankingTopMax: 100,
+  rankingRankScan: 1000,
   ownerLinkTtlMs: 24 * 60 * 60 * 1000,
 };
 
