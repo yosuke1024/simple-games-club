@@ -83,7 +83,8 @@ async function call(label, path, { method, token, body, ip } = {}) {
   const text = await response.text();
   const ms = Math.round(performance.now() - startedAt);
   const counted = /read=(\d+); written=(\d+)/.exec(response.headers.get('x-club-rows') ?? '');
-  rows.push({
+  const isJson = (response.headers.get('content-type') ?? '').startsWith('application/json');
+  const row = {
     label,
     request: `${verb} ${path.replace(/\/(c|m|ch|inv)_[A-Za-z0-9_-]+/g, '/:id')}`,
     status: response.status,
@@ -91,8 +92,17 @@ async function call(label, path, { method, token, body, ip } = {}) {
     written: counted ? Number(counted[2]) : NaN,
     bytes: new TextEncoder().encode(text).byteLength,
     ms,
-  });
-  return text === '' ? null : JSON.parse(text);
+    ray: response.headers.get('cf-ray'),
+  };
+  rows.push(row);
+  if (text === '') return null;
+  if (!isJson) {
+    // A real deployment can answer with Cloudflare's own HTML (a 1101 for a
+    // thrown exception, a challenge page); keep what it said and carry on.
+    row.snippet = text.replace(/\s+/g, ' ').slice(0, 300);
+    return null;
+  }
+  return JSON.parse(text);
 }
 
 const challengeBody = (seed) => ({
@@ -118,10 +128,25 @@ const owner = await call('claim', '/api/v1/claim', {
 });
 if (!owner?.memberToken) {
   await dispose();
-  throw new Error(`claim failed: ${JSON.stringify(owner)}`);
+  throw new Error(`claim failed: ${JSON.stringify(rows.at(-1))}`);
+}
+if (live) {
+  // The tokens of this run, so a later step (or a rerun after a failure) can
+  // continue as the same owner. data/ is gitignored.
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  mkdirSync(join(ROOT, 'data'), { recursive: true });
+  writeFileSync(
+    join(ROOT, 'data', 'cloudflare-spike.session.json'),
+    JSON.stringify({ url: live, claimedAt: new Date().toISOString(), owner }, null, 2),
+  );
 }
 await call('health, claimed', '/api/v1/health');
 const invite = await call('read invite', '/api/v1/invite', { token: owner.memberToken });
+if (!invite?.token) {
+  await dispose();
+  console.log(JSON.stringify(rows, null, 2));
+  throw new Error('GET /invite did not return a token; the rows above show what came back');
+}
 const member = await call('join', '/api/v1/join', {
   body: { inviteToken: invite.token, nickname: 'Ken' },
   ip: '203.0.113.10',
@@ -219,3 +244,9 @@ console.log(
 console.log(
   `All told: ${rows.length} requests, ${rows.filter((r) => r.status >= 500).length} server errors, ${rows.filter((r) => r.status === 429).length} rate-limited.`,
 );
+const odd = rows.filter((r) => r.snippet !== undefined);
+if (odd.length > 0) {
+  console.log('\nReplies that were not JSON:');
+  for (const r of odd)
+    console.log(`- ${r.request} → ${r.status} (${r.ray ?? 'no cf-ray'}): ${r.snippet}`);
+}

@@ -11,6 +11,11 @@ main = "src/worker/index.ts"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
+# The deployment's address. A custom domain on a zone this account holds:
+# wrangler creates the DNS record and certificate on deploy. workers.dev stays
+# on as well until the domain is confirmed working; then `workers_dev = false`.
+routes = [{ pattern = "club.pixapps.ai", custom_domain = true }]
+
 # Hashed assets are served here, free and before the Worker runs; only the
 # API and the entry pages reach the Worker (and so count as requests).
 [assets]
@@ -31,6 +36,8 @@ new_sqlite_classes = ["ClubObject"]
 
 [vars]
 CLUB_HOSTING_PROVIDER = "cloudflare"
+# Invite links name this origin whichever hostname the request arrived on.
+CLUB_PUBLIC_ORIGIN = "https://club.pixapps.ai"
 
 # Workers Logs: the request count is visible in the dashboard either way; this
 # keeps the object's console.error (a 500) readable. Free plan: 200,000 events
