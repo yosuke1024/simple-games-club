@@ -1,6 +1,6 @@
 /**
  * `GET /records` — the old form of the rankings' leaders (club.md §16-1): one
- * row per table, the best member's row. Kept so a client that predates
+ * row per table, the leading row. Kept so a client that predates
  * rankings still reads something true; `challengeId` is always `''` because a
  * record no longer belongs to a challenge.
  */

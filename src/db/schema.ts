@@ -11,7 +11,7 @@
  * except the member invite token, which the owner has to be able to read
  * back and hand out again (club.md §5-1), so it is stored as issued.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /*
  * v2 (the Public deployment, club.md §5-4): `challenges.daily` tags a board as
@@ -25,7 +25,7 @@ export const SCHEMA_VERSION = 5;
  * rankings' leaders. `ranking_entries.seq` is a counter bumped on every write
  * (meta `ranking_seq`) — arrival order, which breaks ties between equal values.
  * `ranking_tables` is one summary row per table (entry count and leader),
- * kept by `offerRanking`, so a list read costs the number of tables, not of
+ * kept by the store on every write, so a list read costs the number of tables, not of
  * entries (docs/cloudflare.md §4).
  *
  * v4 (the Public deployment's operation, club.md §17): `reports` — one row per
@@ -45,7 +45,55 @@ export const SCHEMA_VERSION = 5;
  * "one result per member per challenge" true after the delete: a later submission by that
  * member is refused (409 `already_submitted`), so deleting a day's result means leaving that
  * day's challenge. `CREATE TABLE IF NOT EXISTS`, so an existing v5 database gains it on start.
+ *
+ * v6 (one row per result, club.md §16-1, 2026-10-10): `ranking_entries` holds every completed
+ * result as its own row — a member appears in a table as often as they finished a game there,
+ * up to `rankingRowsPerMember` (src/limits.ts) — keyed by `seq`, the arrival counter the rows
+ * already carried (still taken from meta `ranking_seq`, so a deleted row's number is never
+ * handed out again; a bare rowid would reuse the largest one). `ranking_tables.entry_count`
+ * counts result rows and `leader_seq` names the leading row. `upgradeToV6` (src/db/driver.ts)
+ * rebuilds both tables of a v5 database, each member's one best becoming their first row.
+ *
+ * Also v6, same unreleased step (no version of its own): `ranking_entries.client_id` — the
+ * idempotency key the client sends with a result (`clientId`, club.md §16-1; `^[A-Za-z0-9_-]{8,64}$`),
+ * NULL for a row copied from v5 or sent without one. A partial unique index
+ * `ranking_entries_client ON (member_id, client_id) WHERE client_id IS NOT NULL` is the
+ * guarantee that a member's resend (the first answer was lost) cannot become a second row;
+ * `Store.addRanking` looks the pair up first and answers with the stored row. The column is
+ * in `RANKING_ENTRIES_SQL`, and `migrate()` adds it to a database already at v6 without it
+ * (a developer database from before the key — v6 was never deployed) before the index is built.
  */
+
+/**
+ * The two ranking tables in their v6 shape, apart so `upgradeToV6` (src/db/driver.ts) can
+ * create them again after setting a v5 table aside. One row per result, keyed by `seq`.
+ */
+export const RANKING_ENTRIES_SQL = `
+CREATE TABLE IF NOT EXISTS ranking_entries (
+  game_id TEXT NOT NULL,
+  params_key TEXT NOT NULL,
+  member_id TEXT NOT NULL REFERENCES members(id),
+  nickname TEXT NOT NULL,
+  value REAL NOT NULL,
+  facts_json TEXT NOT NULL,
+  seed TEXT NOT NULL,
+  board_digest TEXT,
+  submitted_at TEXT NOT NULL,
+  seq INTEGER PRIMARY KEY,
+  client_id TEXT
+);
+`;
+
+/** One summary row per table: how many result rows it holds, and the leading row. */
+export const RANKING_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS ranking_tables (
+  game_id TEXT NOT NULL,
+  params_key TEXT NOT NULL,
+  entry_count INTEGER NOT NULL,
+  leader_seq INTEGER NOT NULL,
+  PRIMARY KEY (game_id, params_key)
+);
+`;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -126,27 +174,8 @@ CREATE TABLE IF NOT EXISTS withdrawn_results (
   PRIMARY KEY (challenge_id, member_id)
 );
 
-CREATE TABLE IF NOT EXISTS ranking_entries (
-  game_id TEXT NOT NULL,
-  params_key TEXT NOT NULL,
-  member_id TEXT NOT NULL REFERENCES members(id),
-  nickname TEXT NOT NULL,
-  value REAL NOT NULL,
-  facts_json TEXT NOT NULL,
-  seed TEXT NOT NULL,
-  board_digest TEXT,
-  submitted_at TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  PRIMARY KEY (game_id, params_key, member_id)
-);
-
-CREATE TABLE IF NOT EXISTS ranking_tables (
-  game_id TEXT NOT NULL,
-  params_key TEXT NOT NULL,
-  entry_count INTEGER NOT NULL,
-  leader_member_id TEXT NOT NULL,
-  PRIMARY KEY (game_id, params_key)
-);
+${RANKING_ENTRIES_SQL}
+${RANKING_TABLES_SQL}
 
 CREATE TABLE IF NOT EXISTS reports (
   target_id TEXT NOT NULL,
@@ -163,6 +192,16 @@ CREATE TABLE IF NOT EXISTS reports (
 export const RANKING_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS ranking_entries_table
   ON ranking_entries (game_id, params_key, value, seq);
+`;
+
+/**
+ * The idempotency key of a ranking result (club.md §16-1): one row per (member, `clientId`).
+ * Partial, so the rows without a key — v5's and legacy clients' — are not in it and cost nothing.
+ * Run by `migrate()` once `ranking_entries.client_id` is certain to exist.
+ */
+export const RANKING_CLIENT_INDEX_SQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS ranking_entries_client
+  ON ranking_entries (member_id, client_id) WHERE client_id IS NOT NULL;
 `;
 
 /** Run by `migrate()` once `challenges.daily` is certain to exist (after upgradeToV2). */
@@ -192,12 +231,19 @@ CREATE INDEX IF NOT EXISTS ranking_tables_popular
 
 /**
  * A member's own rows. Neither table's key leads with `member_id` (results: `challenge_id`;
- * ranking_entries: `game_id, params_key`), so without these a member's rename (`PATCH /me`) or
- * the owner's removal with the work reads every row of both tables. Like the other indexes
- * they are created idempotently on every start, so no schema version is needed; the price is
- * one more index row written per result and per new ranking entry (docs/cloudflare.md §5).
+ * ranking_entries: `seq`), so without these a member's rename (`PATCH /me`) or the owner's
+ * removal with the work reads every row of both tables. Like the other indexes they are
+ * created idempotently on every start; the price is one more index row written per result
+ * and per ranking row (docs/cloudflare.md §5).
+ *
+ * Since v6 `ranking_entries_member` runs on to `(game_id, params_key, value)` (and `seq`, the
+ * rowid, after them): a member's rows in one table, best or worst first, are a walk of it —
+ * the per-member cap on every insert, the member's best for `me` and `GET /rankings/mine`, and
+ * their tables for `mine` — so none of those reads touches another member's rows.
+ * `upgradeToV6` drops the v5 `(member_id)` index, which `IF NOT EXISTS` would otherwise keep.
  */
 export const MEMBER_ROWS_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS results_member ON results (member_id);
-CREATE INDEX IF NOT EXISTS ranking_entries_member ON ranking_entries (member_id);
+CREATE INDEX IF NOT EXISTS ranking_entries_member
+  ON ranking_entries (member_id, game_id, params_key, value);
 `;

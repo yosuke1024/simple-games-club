@@ -171,10 +171,12 @@ GET    /api/v1/challenges/:id/results        member        Result[]  (best first
 POST   /api/v1/challenges/:id/results        member        one per member → Result (409 `already_submitted` when they already sent one, or deleted theirs)
 DELETE /api/v1/challenges/:id/results/me     member        204; deletes the caller's own result (resultCount follows) and leaves a mark: they cannot send another to this challenge, on this route or by posting the same board to `POST /challenges` (409 `already_submitted`). 404 when they have no result there or the challenge is deleted. Their ranking rows, the challenge and the others' results stay
 GET    /api/v1/records                       member        the rankings' leaders in the old shape ({ gameId, paramsKey, facts, memberId, nickname, challengeId: '' }[])
-POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts } → { gameId, paramsKey, improved, entry, entryCount } (201 when the member's row was inserted or replaced, else 200)
-GET    /api/v1/rankings                      member        [{ gameId, paramsKey, entryCount, leader }] — one per table
-GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry } | null } (top 50, at most 100; `me.rank` is `null` when the viewer is below the `rankingRankScan` ceiling, 1000 better rows, so the count stays bounded)
-DELETE /api/v1/rankings/:gameId/:paramsKey/me  member     204; deletes the caller's own row in that table (the table's count and leader follow; its summary row goes when it empties). 404 when they have no row there. The next finished game enters the table again as usual
+POST   /api/v1/rankings/results              member        { gameId, contractVersion, paramsKey, params, seed, boardDigest|null, outcome, facts, clientId? } → { gameId, paramsKey, improved, entry, entryCount } (201 for a completed result, which is always a new row — `entry` is null only when the member's cap of 50 rows per table dropped it, `improved` says it beats all their other rows there; 200 for a played one, which stores nothing and echoes their best row. `clientId` (optional, `^[A-Za-z0-9_-]{8,64}$`, else 400) is the client's idempotency key: the same member's same `clientId` a second time inserts nothing and answers 200 with the stored row, `improved: false`, so a result whose answer was lost can be sent again; without one, every send is a row)
+GET    /api/v1/rankings                      member        [{ gameId, paramsKey, entryCount, leader }] — one per table; entryCount counts result rows
+GET    /api/v1/rankings/mine                 member        [{ gameId, paramsKey, entryCount, leader, best: { rank, entry, nextValue } }] — the tables the caller has rows in; `rank` counted to `rankingMineScan` (50), else null
+GET    /api/v1/rankings/:gameId/:paramsKey[?top=N]  member { gameId, paramsKey, entryCount, entries[], me: { rank, entry, nextValue } | null } (top 50, at most 100; `me.entry` is the viewer's best row, `me.rank` is `null` when the viewer is below the `rankingRankScan` ceiling, 1000 better rows, so the count stays bounded; `me.nextValue` is the nearest strictly better value, null when none)
+DELETE /api/v1/rankings/:gameId/:paramsKey/entries/:id  member  204; deletes one of the caller's own rows (`entry.id`); the table's count and leader follow, its summary row goes when it empties. 404 when the row is not theirs, not in that table, gone, or the id is malformed. Their other rows stay
+DELETE /api/v1/rankings/:gameId/:paramsKey/me  member     204; compatibility (v1.4.0 clients): deletes every row of the caller's in that table. 404 when they have none. The next finished game enters the table again as usual
 GET    /api/v1/hosting                       member        { provider, manageUrl (owners), referralUrl, lastActivityAt }
 PATCH  /api/v1/hosting                       owner         { referralUrl | null }
 GET    /api/v1/invite                        owner         { token, url }
@@ -204,8 +206,10 @@ Points the implementation settles within the contract:
   supported game (club.md §6-1). The mode a ranking table is kept for is the
   client's `paramsKey`; the server checks only its shape. A game not listed
   there has challenges and results but no rankings until the server learns it.
-  A ranking table holds one row per member — their personal best, replaced only
-  by a strictly better completed result — and records are those tables' leaders.
+  A ranking table holds one row per completed result (schema 6) — a member appears
+  as often as they finished there, up to `rankingRowsPerMember` (50) rows per table,
+  past which their worst row goes — and records are those tables' leaders. A row's
+  `id` is its arrival counter, which also orders equal values.
 - A `nickname` (claim, join, rename) is NFC-normalized, trimmed, runs of whitespace
   collapsed, must hold at least one letter or number and no control, format,
   private-use, surrogate or unassigned code point, and is 1..24 code points (club.md §17-1).
@@ -227,7 +231,9 @@ Points the implementation settles within the contract:
   day. It is the only route that sends `Cache-Control: public`; every other response is `no-store`.
 - Limits: 5 owners and 100 members per club, 10 join/claim attempts per IP per
   minute, 60 requests per member per minute, `GET /club` lists the newest 50 members (`membersPage`), 16KB per request, 1KB per
-  `params` and per `facts`, rankings top 50 (at most 100), rank scan ceiling `rankingRankScan` 1000.
+  `params` and per `facts`, rankings top 50 (at most 100), rank scan ceiling `rankingRankScan` 1000
+  (`rankingMineScan` 50 in `GET /rankings/mine`), 50 ranking rows per member per table
+  (`rankingRowsPerMember`).
 
 ## What is stored, what is logged
 

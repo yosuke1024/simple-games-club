@@ -7,8 +7,8 @@ const execArgv = ['--disable-warning=ExperimentalWarning'];
 // The same contract tests run against both deployments (club.md §5: "the same"
 // means the same tests, not shared code). `test/helpers.ts` starts whichever
 // `CLUB_IMPL` names. Two files are Node's alone: the static file server
-// (Workers serve the build from the assets binding), the Node unit tests and
-// the migration test (it opens a node:sqlite file by hand).
+// (Workers serve the build from the assets binding), the Node unit tests, the
+// migration test and the ranking store test (they open a node:sqlite database by hand).
 export default defineConfig({
   test: {
     projects: [
@@ -26,7 +26,13 @@ export default defineConfig({
           name: 'workers',
           environment: 'node',
           include: ['test/**/*.test.ts'],
-          exclude: ['test/static.test.ts', 'test/units.test.ts', 'test/migrate.test.ts'],
+          exclude: [
+            'test/static.test.ts',
+            'test/units.test.ts',
+            'test/migrate.test.ts',
+            'test/ranking-store.test.ts',
+            'test/api-drain.test.ts',
+          ],
           env: { CLUB_IMPL: 'workers' },
           globalSetup: ['test/workers/globalSetup.ts'],
           execArgv,

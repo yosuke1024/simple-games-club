@@ -51,6 +51,18 @@ export const paramsKey = (value: unknown): string => {
   }
   return value;
 };
+/**
+ * `clientId` of a ranking result (club.md §16-1): the idempotency key the client makes when it
+ * queues the result — a random string, not an identity. Absent (a client from before the key)
+ * means none; present — `null` included — it has the one shape, or the request is a 400.
+ */
+export const clientIdOrNull = (value: unknown): string | null => {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(value)) {
+    throw invalidRequest('clientId must be 8..64 characters of A-Z, a-z, 0-9, _ and -');
+  }
+  return value;
+};
 /** `?top=`: absent means the default; otherwise a positive integer, capped. */
 export const top = (value: string | null, fallback: number, max: number): number => {
   if (value === null) return fallback;

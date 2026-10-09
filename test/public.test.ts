@@ -241,7 +241,8 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     const sam = await joinOpen('Sam');
     const lee = await joinOpen('Lee');
 
-    // sudoku (lower is better): Mai 100 first, then Ken 120 joins and later ties her at 100.
+    // sudoku (lower is better): Mai 100 first, then Ken 120, and later a second row of Ken's that
+    // ties her at 100 — one row per result, so Ken is in the table twice.
     await offer(mai, 'sudoku', { elapsedSeconds: 100 });
     await offer(ken, 'sudoku', { elapsedSeconds: 120 });
     await offer(sam, 'sudoku', { elapsedSeconds: 90 });
@@ -255,13 +256,14 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     await offer(sam, '2048', { score: 20 }); // ties Mai at 20, arrived later
     await offer(yoh, 'hearts', { score: 12 });
     await offer(ken, 'hearts', { score: 3 });
+    await offer(ken, 'hearts', { score: 5 }); // the same name twice in a top three is not folded
 
     const reply = await server.api(`/api/v1/public?date=${DAY}`);
     const tables = reply.json.rankings as PublicTable[];
     expect(tables.map((t) => [t.gameId, t.entryCount])).toEqual([
-      ['sudoku', 5],
+      ['sudoku', 6],
       ['2048', 4],
-      ['hearts', 2],
+      ['hearts', 3],
     ]);
     expect(tables[0]!.top).toEqual([
       { nickname: 'Sam', facts: { elapsedSeconds: 90 } },
@@ -275,6 +277,7 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     ]);
     expect(tables[2]!.top).toEqual([
       { nickname: 'Ken', facts: { score: 3 } },
+      { nickname: 'Ken', facts: { score: 5 } },
       { nickname: 'Yoh', facts: { score: 12 } },
     ]);
     for (const table of tables) expect(table.leader).toEqual(table.top[0]);
@@ -350,13 +353,13 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     };
     expect(await order()).toEqual(['hearts:2', 'sudoku:1']);
     await offer(ken, 'sudoku', { elapsedSeconds: 90 }); // sudoku 2: ties hearts, "hearts" < "sudoku"
-    await offer(yoh, 'hearts', { score: 4 }); // an improvement, not a new entry: counts do not move
-    expect(await order()).toEqual(['hearts:2', 'sudoku:2']);
+    await offer(yoh, 'hearts', { score: 4 }); // a second row of Yoh's: every result counts
+    expect(await order()).toEqual(['hearts:3', 'sudoku:2']);
     await server.api(`/api/v1/members/${ken.memberId}?purge=1`, {
       method: 'DELETE',
       token: yoh.token,
     });
-    expect(await order()).toEqual(['hearts:1', 'sudoku:1']);
+    expect(await order()).toEqual(['hearts:2', 'sudoku:1']);
   });
 
   it('takes the top three of a higher-is-better table from above the cut, then the earliest tied at it', async () => {
