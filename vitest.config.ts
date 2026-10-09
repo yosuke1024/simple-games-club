@@ -31,6 +31,7 @@ export default defineConfig({
             'test/units.test.ts',
             'test/migrate.test.ts',
             'test/ranking-store.test.ts',
+            'test/api-drain.test.ts',
           ],
           env: { CLUB_IMPL: 'workers' },
           globalSetup: ['test/workers/globalSetup.ts'],

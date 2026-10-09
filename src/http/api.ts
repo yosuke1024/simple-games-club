@@ -105,44 +105,77 @@ export function createApi(options: ApiOptions): Api {
     };
     if (request.method === 'OPTIONS') return { status: 204, headers, body: null };
 
-    try {
-      const match = router.match(request.method, request.url.pathname);
-      if (match === null) throw notFound('no such endpoint');
-      const { route, params } = match;
+    // The JSON body, read once and only when a handler asks (`ctx.body()`).
+    let body: Promise<JsonObject> | null = null;
+    const response = await (async (): Promise<ApiResponse> => {
+      try {
+        const match = router.match(request.method, request.url.pathname);
+        if (match === null) throw notFound('no such endpoint');
+        const { route, params } = match;
 
-      let member: Ctx['member'] = null;
-      if (route.auth !== 'none') {
-        const token = bearerToken(request.header('authorization'));
-        member = token === null ? null : store.memberByTokenHash(hashToken(config.secret, token));
-        if (member === null) throw unauthorized();
-        if (route.auth === 'owner' && member.role !== 'owner') throw forbidden();
-      }
+        let member: Ctx['member'] = null;
+        if (route.auth !== 'none') {
+          const token = bearerToken(request.header('authorization'));
+          member = token === null ? null : store.memberByTokenHash(hashToken(config.secret, token));
+          if (member === null) throw unauthorized();
+          if (route.auth === 'owner' && member.role !== 'owner') throw forbidden();
+        }
 
-      const nowMs = request.now.getTime();
-      if (route.limit === 'ip' && !ipLimiter.allow(request.clientIp, nowMs)) throw rateLimited();
-      if (route.limit === 'member' && member !== null && !memberLimiter.allow(member.id, nowMs)) {
-        throw rateLimited();
-      }
+        const nowMs = request.now.getTime();
+        if (route.limit === 'ip' && !ipLimiter.allow(request.clientIp, nowMs)) throw rateLimited();
+        if (route.limit === 'member' && member !== null && !memberLimiter.allow(member.id, nowMs)) {
+          throw rateLimited();
+        }
 
-      let body: Promise<JsonObject> | null = null;
-      const ctx: Ctx = {
-        params,
-        query: request.url.searchParams,
-        member,
-        body: () => (body ??= readJsonObject(request.body, limits.bodyBytes)),
-        origin: request.origin,
-        now: request.now,
-      };
-      const reply = await route.handler(ctx);
-      return json({ ...headers, ...reply.headers }, reply.status, reply.body);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        return json(headers, error.status, { error: { code: error.code, message: error.message } });
+        const ctx: Ctx = {
+          params,
+          query: request.url.searchParams,
+          member,
+          body: () => (body ??= readJsonObject(request.body, limits.bodyBytes)),
+          origin: request.origin,
+          now: request.now,
+        };
+        const reply = await route.handler(ctx);
+        return json({ ...headers, ...reply.headers }, reply.status, reply.body);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          return json(headers, error.status, {
+            error: { code: error.code, message: error.message },
+          });
+        }
+        console.error(error);
+        return json(headers, 500, { error: { code: 'internal_error', message: 'internal error' } });
       }
-      console.error(error);
-      return json(headers, 500, { error: { code: 'internal_error', message: 'internal error' } });
+    })();
+    // A route refused before it read its body (401, 403, 404, 429) leaves the body
+    // on the connection; drained, the connection can carry the next request.
+    if (body === null && request.method !== 'GET' && request.method !== 'HEAD') {
+      await drainUnread(request.body, limits.bodyBytes);
     }
+    return response;
   };
 
   return { handle, limits };
+}
+
+/**
+ * Reads what a handler left unread of the request body, so the connection can
+ * carry the next request. workerd closes an HTTP/1.1 connection whose request
+ * body was not consumed instead of keeping it alive, and a client that has
+ * already reused that connection sees a reset (`ECONNRESET`) on its next
+ * request — a member's refused `PATCH /club` followed by anything else, for
+ * one. Bounded by the body limit: past it the rest is abandoned and the
+ * connection closes, which is right for a body the API would refuse anyway.
+ * Nothing here changes the response, which is already decided.
+ */
+async function drainUnread(body: BodySource, limit: number): Promise<void> {
+  let read = 0;
+  try {
+    for await (const chunk of body.chunks()) {
+      read += chunk.byteLength;
+      if (read > limit) break;
+    }
+  } catch {
+    // A body that cannot be read is a connection that is gone; the response stands.
+  }
 }
