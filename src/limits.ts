@@ -34,6 +34,20 @@ export interface Limits {
    * the club. A viewer ranked below this is shown without a number.
    */
   rankingRankScan: number;
+  /**
+   * Rows one member may hold in one ranking table (club.md §16-1). Every finished game is a
+   * row; past this many the member's worst row in the table goes. It bounds what one member
+   * can store — the limiter alone would let 60 results a minute pile up to 86,400 rows a day —
+   * and the count every insert makes (`LIMIT rankingRowsPerMember + 1`). Ordinary play does
+   * not reach it.
+   */
+  rankingRowsPerMember: number;
+  /**
+   * How far `GET /rankings/mine` counts each table's rank (club.md §16-1): below this the
+   * list shows the member's best without a number, and the table's own screen counts on to
+   * `rankingRankScan`. Kept small because the list counts once per table the member is in.
+   */
+  rankingMineScan: number;
   /** Owner links — one use, and this long. */
   ownerLinkTtlMs: number;
 }
@@ -51,6 +65,8 @@ export const DEFAULT_LIMITS: Limits = {
   rankingTop: 50,
   rankingTopMax: 100,
   rankingRankScan: 1000,
+  rankingRowsPerMember: 50,
+  rankingMineScan: 50,
   ownerLinkTtlMs: 24 * 60 * 60 * 1000,
 };
 

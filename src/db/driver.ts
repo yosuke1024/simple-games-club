@@ -10,8 +10,11 @@ import { contractOf, resultRank } from '../contracts/games.js';
 import {
   DAILY_INDEX_SQL,
   MEMBER_ROWS_INDEX_SQL,
+  RANKING_CLIENT_INDEX_SQL,
+  RANKING_ENTRIES_SQL,
   RANKING_INDEX_SQL,
   RANKING_POPULAR_INDEX_SQL,
+  RANKING_TABLES_SQL,
   RESULT_RANK_INDEX_SQL,
   REPORTED_INDEX_SQL,
   SCHEMA_SQL,
@@ -36,6 +39,7 @@ export function migrate(db: SqlDriver): void {
   if (row === undefined) {
     db.run(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, String(SCHEMA_VERSION));
     db.exec(RANKING_INDEX_SQL);
+    db.exec(RANKING_CLIENT_INDEX_SQL);
     db.exec(DAILY_INDEX_SQL);
     db.exec(REPORTED_INDEX_SQL);
     db.exec(RESULT_RANK_INDEX_SQL);
@@ -55,7 +59,10 @@ export function migrate(db: SqlDriver): void {
   if (stored < 3) upgradeToV3(db);
   if (stored < 4) upgradeToV4(db);
   if (stored < 5) upgradeToV5(db);
+  if (stored < 6) upgradeToV6(db);
+  addRankingClientId(db);
   db.exec(RANKING_INDEX_SQL);
+  db.exec(RANKING_CLIENT_INDEX_SQL);
   db.exec(DAILY_INDEX_SQL);
   db.exec(REPORTED_INDEX_SQL);
   db.exec(RESULT_RANK_INDEX_SQL);
@@ -153,7 +160,74 @@ export function upgradeToV5(db: SqlDriver): void {
   }
   if (!have.has('rank_key')) db.exec(`ALTER TABLE results ADD COLUMN rank_key REAL`);
   rerankResults(db);
-  db.run(`UPDATE meta SET value = ? WHERE key = 'schema_version'`, String(SCHEMA_VERSION));
+  db.run(`UPDATE meta SET value = '5' WHERE key = 'schema_version'`);
+}
+
+/**
+ * v5 → v6 (club.md §16-1, 2026-10-10): a ranking table holds one row per result instead of
+ * one per member. `ranking_entries` is rebuilt with `seq` — the arrival counter its rows
+ * already carried, unique because every write took a fresh one — as its key, and every row is
+ * copied as it is, so each member's one best becomes their first result row. `ranking_tables`
+ * names its leader by row (`leader_seq`) instead of by member: it is rebuilt from the rows,
+ * which names the same leader the v5 summary did (the best value, the earliest `seq` on a
+ * tie), and its count is the rows, which in a v5 database is the members. The v5 `(member_id)` index
+ * goes with the old table; migrate() builds the v6 indexes after this.
+ *
+ * Every step can run again: the old table is renamed aside before anything is dropped and is
+ * itself dropped only once its rows are copied, so a run that stopped half-way — even with the
+ * empty v6 table SCHEMA_SQL created on the next start — finds it and finishes the copy.
+ */
+export function upgradeToV6(db: SqlDriver): void {
+  const columns = (table: string) => db.all(`PRAGMA table_info(${table})`);
+  const keyOfEntries = columns('ranking_entries')
+    .filter((column) => Number(column.pk) > 0)
+    .map((column) => String(column.name));
+  if (keyOfEntries.includes('member_id')) {
+    db.exec(`DROP INDEX IF EXISTS ranking_entries_member`);
+    db.exec(`DROP INDEX IF EXISTS ranking_entries_table`);
+    db.exec(`ALTER TABLE ranking_entries RENAME TO ranking_entries_v5`);
+  }
+  if (columns('ranking_entries_v5').length > 0) {
+    db.exec(RANKING_ENTRIES_SQL);
+    db.exec(
+      `INSERT OR IGNORE INTO ranking_entries
+         (game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest,
+          submitted_at, seq)
+       SELECT game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest,
+              submitted_at, seq
+       FROM ranking_entries_v5`,
+    );
+    db.exec(`DROP TABLE ranking_entries_v5`);
+  }
+  // The counter must stay ahead of every row, or a new result would take a used key.
+  const top = Number(db.get(`SELECT COALESCE(MAX(seq), 0) AS top FROM ranking_entries`)?.top ?? 0);
+  const counter = db.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`);
+  if (counter === undefined || Number(counter.value) < top) {
+    db.run(
+      `INSERT INTO meta (key, value) VALUES ('ranking_seq', ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      String(top),
+    );
+  }
+  if (!columns('ranking_tables').some((column) => String(column.name) === 'leader_seq')) {
+    db.exec(`DROP TABLE IF EXISTS ranking_tables`); // its ranking_tables_popular index with it
+    db.exec(RANKING_TABLES_SQL);
+  }
+  rebuildRankingTables(db);
+  db.run(`UPDATE meta SET value = '6' WHERE key = 'schema_version'`);
+}
+
+/**
+ * `ranking_entries.client_id` (club.md §16-1, the result's idempotency key) belongs to the
+ * v6 table itself, not to a version of its own: v6 was never deployed. A table `upgradeToV6`
+ * or `SCHEMA_SQL` just made has it; this adds it to one already at v6 from before the key
+ * (a developer database), where every row has none. Checked first, so it can run again.
+ */
+function addRankingClientId(db: SqlDriver): void {
+  const have = db
+    .all(`PRAGMA table_info(ranking_entries)`)
+    .some((column) => String(column.name) === 'client_id');
+  if (!have) db.exec(`ALTER TABLE ranking_entries ADD COLUMN client_id TEXT`);
 }
 
 /**
@@ -186,8 +260,15 @@ export function rerankResults(db: SqlDriver): void {
   }
 }
 
-/** One pass over the entries, grouped in code: count and leader per table. */
+/**
+ * One pass over the entries, grouped in code: count and leader per table. The leader is
+ * written as `leader_seq` (v6), or as `leader_member_id` when `upgradeToV3` meets a summary
+ * table still in its pre-v6 shape (`upgradeToV6` replaces that table afterwards).
+ */
 function rebuildRankingTables(db: SqlDriver): void {
+  const bySeq = db
+    .all(`PRAGMA table_info(ranking_tables)`)
+    .some((column) => String(column.name) === 'leader_seq');
   db.run(`DELETE FROM ranking_tables`);
   const tables = new Map<
     string,
@@ -224,12 +305,12 @@ function rebuildRankingTables(db: SqlDriver): void {
   }
   for (const t of tables.values()) {
     db.run(
-      `INSERT INTO ranking_tables (game_id, params_key, entry_count, leader_member_id)
+      `INSERT INTO ranking_tables (game_id, params_key, entry_count, ${bySeq ? 'leader_seq' : 'leader_member_id'})
        VALUES (?, ?, ?, ?)`,
       t.gameId,
       t.paramsKey,
       t.count,
-      t.leader,
+      bySeq ? t.seq : t.leader,
     );
   }
 }

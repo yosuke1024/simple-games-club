@@ -254,6 +254,90 @@ What the table says, and what it does not:
   daily top three). Ship such a change with a schema bump whose upgrade calls
   `rerankResults(db)` (src/db/driver.ts), which rewrites only the rows whose rank changed.
 
+### 2026-10-10 (schema 6, one row per result)
+
+A ranking table now holds every finished game as its own row (simple-games club.md §16-1):
+`ranking_entries` is keyed by `seq`, `ranking_tables` names its leader by row (`leader_seq`),
+`ranking_entries_member` became `(member_id, game_id, params_key, value)`, and a member holds
+at most `rankingRowsPerMember` (50) rows per table — past it their worst row goes. A result
+may carry a `clientId` (club.md §16-1), stored as `ranking_entries.client_id` and held unique
+per member by the partial index `ranking_entries_client`; a resend of it is answered from
+that index without a write (the figures follow the table). Measured 2026-10-10 in workerd
+(compatibility date 2026-09-01) through the Workers harness, reading `X-Club-Rows` from a
+one-off test that is not checked in (the `clientId` rows below were measured the same way, in
+the same harness, after the key was added); "others" are other members with two rows each in
+the same table. The first five rows are results sent without a `clientId`:
+
+| Step                                                                                  | Rows read | Rows written |
+| ------------------------------------------------------------------------------------- | --------: | -----------: |
+| `POST /rankings/results`, the first row of a new table                                |         5 |            9 |
+| `POST /rankings/results`, a member's first row in a table of 6 rows                   |        11 |            7 |
+| `POST /rankings/results`, the member's 10th row there                                 |        20 |            7 |
+| `POST /rankings/results`, the 51st row, better: kept, their worst goes                |        65 |           10 |
+| `POST /rankings/results`, the 52nd row, worse than all: stored and gone               |        65 |           10 |
+| …with a `clientId`: the first row of a new table (the database's first ranking write) |         5 |           10 |
+| …with a `clientId`: a member's first row in a table of 6 rows                         |        11 |            8 |
+| …with a `clientId`: the member's 10th row there                                       |        20 |            8 |
+| …with a `clientId`: the 51st row, better: kept, their worst goes                      |        65 |           11 |
+| …with a `clientId`: the 52nd row, worse than all: stored and gone                     |        65 |           11 |
+| …a `clientId` sent again, the row is stored (200), table of 1 / 80 rows               |     4 / 4 |        0 / 0 |
+| …a `clientId` sent again, its result was dropped by the cap (201)                     |        65 |           11 |
+| `GET /rankings/:g/:p?top=1`, the viewer leads, 3 others                               |         8 |            0 |
+| `GET /rankings/:g/:p?top=1`, the viewer leads, 40 others                              |         8 |            0 |
+| `GET /rankings/:g/:p` (top 50), the viewer leads, 3 / 40 others                       |   15 / 57 |            0 |
+| `GET /rankings/:g/:p?top=1`, the viewer below the others, 3 / 40 others               |   15 / 90 |            0 |
+| `GET /rankings/mine`, 1 table, the viewer leads, 3 / 40 others                        |   11 / 11 |            0 |
+| `GET /rankings/mine`, 1 table, the viewer below the others, 3 / 40                    |   17 / 58 |            0 |
+| `GET /rankings/mine`, a member with 2 rows in 1 table                                 |        13 |            0 |
+| `GET /rankings/mine`, a member with 2 rows in each of 5 tables                        |        42 |            0 |
+| `DELETE /rankings/:g/:p/entries/:id`, a row that does not lead                        |         5 |            3 |
+| `DELETE /rankings/:g/:p/entries/:id`, the leading row                                 |         7 |            3 |
+| `DELETE /rankings/:g/:p/entries/:id`, already gone (404)                              |         2 |            0 |
+| `DELETE /rankings/:g/:p/me`, 5 rows of the caller's                                   |        20 |            7 |
+
+- **A `clientId` costs one row written per keyed insert and nothing to read.** The key's
+  entry in `ranking_entries_client` is one more index row (7 → 8, 10 → 11 above; 9 → 10 for
+  the first row of a table), and the lookup that runs first reads nothing when it finds no
+  row: the five results sent without a key were measured again with the column and the index
+  in place and did not move (11 / 7, 20 / 7, 65 / 10, 65 / 10; a first row of a new table
+  read 5 / 9 as the database's first ranking write and 8 / 8 otherwise). Rows without a key are not
+  in the partial index, so v5 rows and legacy clients pay nothing. **A resent `clientId` whose
+  row is stored writes nothing** — not the row, the counter, the summary, the cap's count nor
+  the activity stamp — and reads 4 rows with 1 or with 80 other rows in the table (one run read
+  3 for one of them; the split between the member lookup, the key's index entry and row, and
+  the table's count was not measured). `test/rankings.test.ts` pins it on Workers: written 0
+  and the read not growing with the table. A resend of a result the cap had dropped on
+  arrival is not remembered (nothing was stored), so it goes the whole way again and is
+  dropped again: the 65 / 11 above. Deleting a keyed row (the key's index entry goes with
+  it) was not measured; the delete figures above are of rows without a key.
+- **Every insert counts the member's own rows in the table**, stopping at 51
+  (`LIMIT rankingRowsPerMember + 1`), so a submission reads more as the member's rows there
+  grow — 11, 20, 65 above — and never more than that, whatever the table or the club. The
+  per-member cap is also what bounds storage: without it, one member at the limiter's 60
+  requests a minute could add 86,400 rows a day to one table.
+- **What does not grow with the table** is the viewer's own part of a read: their best row,
+  the rank count when nothing is above them, the next value (one index row) and the summary —
+  8 rows with 3 or 40 others. The checked-in Workers test (`test/rankings.test.ts`) pins it for
+  the table read and for `/rankings/mine`, and fails when the rank is counted with the former
+  single `value < ? OR (value = ? AND seq < ?)`: 14 → 90 rows, because the planner then walks
+  the whole table (`EXPLAIN QUERY PLAN` in `test/migrate.test.ts` pins the two ranges).
+- **What does grow, bounded**: the listed rows (`?top`, at most 100), and the rank count when
+  rows are above the viewer — up to `rankingRankScan` (1,000) on the table's screen and
+  `rankingMineScan` (50) per table in `/rankings/mine`, past which the rank is `null`.
+  `/rankings/mine` also walks the member's own rows once to find their tables, at most 50 per
+  table.
+- **The upgrade is one way, like schema 5's.** The object rebuilds both ranking tables on its
+  first request after the deploy (`upgradeToV6`: the v5 table renamed aside, every row copied
+  with its `seq`, the summaries rebuilt from the rows; rows written proportional to the rows
+  stored), and a server older than this refuses the database it leaves
+  (`database schema 6 is newer than this server`). Run once in workerd on a database persisted
+  by the schema-5 bundle (`claude/ranking-rows` before this change), with the bundles swapped
+  on one Miniflare like a redeploy: the first request listed the same three leaders with their
+  row ids, a member's improved v5 row kept its `seq`, the next result became that member's
+  second row with the next id, a row delete answered 204, `/public` listed the same tables, and
+  a second swap changed nothing. That check is a one-off script, not a checked-in test; the same
+  upgrade, and a run that stopped half-way, are tested on node:sqlite in `test/migrate.test.ts`.
+
 ## 4. Where the free plan's ceilings fall (arithmetic, not a forecast)
 
 These are counts, derived from §2 and §3. They say how much use fits in a day, not what
@@ -303,20 +387,25 @@ What a stranger can do without a token, and what it costs in units:
   PR C question.
 - **A member's own levers read only their own rows.** `PATCH /me` (rename) and the owner's
   removal with the work look rows up by `member_id`, and neither `results` (its unique key
-  leads with `challenge_id`) nor `ranking_entries` (its key leads with `game_id, params_key`)
-  has a key that starts there, so `results_member` and `ranking_entries_member`
-  (src/db/schema.ts) exist for them. Without those two indexes a rename read every row of
+  leads with `challenge_id`) nor `ranking_entries` (keyed by `seq` since schema 6; by
+  `game_id, params_key` before) has a key that starts there, so `results_member` and
+  `ranking_entries_member` (src/db/schema.ts; `(member_id, game_id, params_key, value)` since
+  schema 6, which also serves the per-member cap, the member's best and `/rankings/mine`)
+  exist for them. Without those two indexes a rename read every row of
   both tables — a member could spend the free plan's 5 million rows a day by looping on it at
-  the 60 requests a minute the limiter allows. The per-record deletes need no member index:
-  `DELETE /rankings/:gameId/:paramsKey/me` reads the caller's row by primary key and, only
-  when the leader leaves, finds the next one with two one-row walks of
+  the 60 requests a minute the limiter allows. The per-record deletes read by key:
+  `DELETE /rankings/:gameId/:paramsKey/entries/:id` reads the row by `seq` (the compatible
+  `…/me` finds the caller's rows in that table through `ranking_entries_member`) and, only
+  when the leading row goes, finds the next one with two one-row walks of
   `ranking_entries_table` (the best value, then the earliest `seq` at it), and
-  `DELETE /challenges/:id/results/me` uses the `(challenge_id, member_id)` key. Measured in
+  `DELETE /challenges/:id/results/me` uses the `(challenge_id, member_id)` key (schema-6
+  figures in §3, "2026-10-10"). Measured in
   workerd (`X-Club-Rows`, test/members.test.ts): a rename, a delete of the leading row of a
   lower-is-better table and of a higher-is-better table, and a delete of a result each read
   7 rows, the same with 3 or 40 other members' rows in the club (the test also fails when the
   leader lookup is made to scan: 12 → 86 rows). The price of the indexes is **one more row
-  written** per result (6 → 7 for a member's) and per new ranking entry (7 → 8, measured);
+  written** per result (6 → 7 for a member's) and per new ranking entry (7 → 8, measured; one
+  more again for a result that carries a `clientId`, §3 "2026-10-10");
   improving one's own entry should write no index row, since `member_id` does not change
   (not measured). The indexes are created with `IF NOT EXISTS` on every start like the other
   index sets, so no schema version carries them; the first start after an upgrade builds them

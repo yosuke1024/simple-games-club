@@ -71,14 +71,36 @@ export interface RecordRow {
   challengeId: string;
 }
 
-/** One member's personal best in one table (game × mode) — club.md §16. */
+/** One result row of one table (game × mode) — club.md §16-1: one row per result. */
 export interface RankingEntryRow {
+  /** Arrival order and the row's id (`Entry.id` on the wire). */
+  seq: number;
   memberId: string;
   nickname: string;
   submittedAt: string;
   facts: unknown;
   seed: string;
   boardDigest: string | null;
+  /** The table's axis value, read from `facts` once on the way in (src/contracts/games.ts). */
+  value: number;
+}
+
+/** A member's best row in a table, where it stands, and the nearest strictly better value. */
+export interface RankingStandingRow {
+  /** Null past the count's ceiling (limits.rankingRankScan / rankingMineScan). */
+  rank: number | null;
+  entry: RankingEntryRow;
+  /** Null when no row of the table is strictly better — first, or tied with the first. */
+  nextValue: number | null;
+}
+
+/** One table a member has rows in, for `GET /rankings/mine` (club.md §5-4). */
+export interface RankingMineRow {
+  gameId: string;
+  paramsKey: string;
+  entryCount: number;
+  leader: RankingEntryRow;
+  best: RankingStandingRow;
 }
 
 /** A challenge as the public view reads it: no viewer, no creator. */
@@ -165,12 +187,14 @@ const toChallenge = (row: Row): ChallengeRow => ({
 });
 
 const toRankingEntry = (row: Row): RankingEntryRow => ({
+  seq: int(row, 'seq'),
   memberId: text(row, 'member_id'),
   nickname: text(row, 'nickname'),
   submittedAt: text(row, 'submitted_at'),
   facts: parseJson(text(row, 'facts_json')),
   seed: text(row, 'seed'),
   boardDigest: nullableText(row, 'board_digest'),
+  value: Number(row.value),
 });
 
 const toResult = (row: Row): ResultRow => ({
@@ -325,58 +349,96 @@ export class Store {
     );
     this.db.run(`DELETE FROM results WHERE member_id = ?`, id);
     const tables = this.db.all(
-      `SELECT game_id, params_key FROM ranking_entries WHERE member_id = ?`,
+      `SELECT DISTINCT game_id, params_key FROM ranking_entries WHERE member_id = ?`,
       id,
     );
     for (const table of tables) {
-      this.dropRankingEntry(text(table, 'game_id'), text(table, 'params_key'), id);
+      this.removeRankingEntries(text(table, 'game_id'), text(table, 'params_key'), id);
     }
     this.clearReports(id);
   }
 
   /**
-   * A member deleting their own row in one ranking table (club.md §5-3
-   * `DELETE /rankings/:gameId/:paramsKey/me`). Returns false when they have none.
-   * A later finished game enters the table again as usual. Reads by primary key.
+   * A member deleting one of their own results in one ranking table (club.md §5-3
+   * `DELETE /rankings/:gameId/:paramsKey/entries/:id`). False when the row does not exist,
+   * is in another table, or is someone else's — the caller cannot tell those apart. Their
+   * other rows stay, and a later finished game enters the table as usual. Reads by key.
    */
-  removeRankingEntry(gameId: string, paramsKey: string, memberId: string): boolean {
-    if (this.rankingEntry(gameId, paramsKey, memberId) === null) return false;
-    this.dropRankingEntry(gameId, paramsKey, memberId);
-    return true;
-  }
-
-  /**
-   * Deletes the member's row of a table that has one and keeps the table's summary row
-   * (count, leader) in step: the table's row goes when it empties, and when the leader
-   * leaves, the next leader is the best remaining value, the earliest on a tie. Both reads
-   * walk `ranking_entries_table`, so they read one row each however large the table is.
-   */
-  private dropRankingEntry(gameId: string, paramsKey: string, memberId: string): void {
-    this.db.run(
-      `DELETE FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+  removeRankingEntryById(
+    gameId: string,
+    paramsKey: string,
+    memberId: string,
+    seq: number,
+  ): boolean {
+    const row = this.db.get(
+      `SELECT seq FROM ranking_entries
+       WHERE seq = ? AND game_id = ? AND params_key = ? AND member_id = ?`,
+      seq,
       gameId,
       paramsKey,
       memberId,
     );
-    const summary = this.db.get(
-      `SELECT entry_count, leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+    if (row === undefined) return false;
+    this.db.run(`DELETE FROM ranking_entries WHERE seq = ?`, seq);
+    this.settleRankingTable(gameId, paramsKey, [seq]);
+    return true;
+  }
+
+  /**
+   * Every row of the member's in one table (the compatible `DELETE …/me`, and the owner's
+   * removal with the work). False when they have none. At most `rankingRowsPerMember` rows,
+   * found through `ranking_entries_member`.
+   */
+  removeRankingEntries(gameId: string, paramsKey: string, memberId: string): boolean {
+    const seqs = this.db
+      .all(
+        `SELECT seq FROM ranking_entries WHERE member_id = ? AND game_id = ? AND params_key = ?`,
+        memberId,
+        gameId,
+        paramsKey,
+      )
+      .map((row) => int(row, 'seq'));
+    if (seqs.length === 0) return false;
+    this.db.run(
+      `DELETE FROM ranking_entries WHERE member_id = ? AND game_id = ? AND params_key = ?`,
+      memberId,
       gameId,
       paramsKey,
     );
-    if (summary === undefined) return;
-    const dropTable = (): void =>
+    this.settleRankingTable(gameId, paramsKey, seqs);
+    return true;
+  }
+
+  /**
+   * Keeps a table's summary row (count, leader) in step once the rows `removed` are gone: the
+   * summary goes when the table empties, and when the leading row was among them, the next
+   * leader is the best remaining value, the earliest on a tie. Both reads walk
+   * `ranking_entries_table`, so they read one row each however large the table is. Returns
+   * the table's count after.
+   */
+  private settleRankingTable(
+    gameId: string,
+    paramsKey: string,
+    removed: readonly number[],
+  ): number {
+    const summary = this.db.get(
+      `SELECT entry_count, leader_seq FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+      gameId,
+      paramsKey,
+    );
+    if (summary === undefined) return 0;
+    const dropTable = (): number => {
       this.db.run(
         `DELETE FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
         gameId,
         paramsKey,
       );
-    const count = int(summary, 'entry_count') - 1;
-    if (count <= 0) {
-      dropTable();
-      return;
-    }
-    let leader = text(summary, 'leader_member_id');
-    if (leader === memberId) {
+      return 0;
+    };
+    const count = int(summary, 'entry_count') - removed.length;
+    if (count <= 0) return dropTable();
+    let leader = int(summary, 'leader_seq');
+    if (removed.includes(leader)) {
       const best = this.db.get(
         `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ?
          ORDER BY value ${directionOf(gameId) === 'asc' ? 'ASC' : 'DESC'} LIMIT 1`,
@@ -387,28 +449,26 @@ export class Store {
         best === undefined
           ? undefined
           : this.db.get(
-              `SELECT member_id FROM ranking_entries
+              `SELECT seq FROM ranking_entries
                WHERE game_id = ? AND params_key = ? AND value = ? ORDER BY seq LIMIT 1`,
               gameId,
               paramsKey,
               Number(best.value),
             );
       // Out of step with the entries (cannot happen): the table is empty after all.
-      if (next === undefined) {
-        dropTable();
-        return;
-      }
-      leader = text(next, 'member_id');
+      if (next === undefined) return dropTable();
+      leader = int(next, 'seq');
     }
     // The count changed, so `ranking_tables_popular` is rewritten anyway.
     this.db.run(
-      `UPDATE ranking_tables SET entry_count = ?, leader_member_id = ?
+      `UPDATE ranking_tables SET entry_count = ?, leader_seq = ?
        WHERE game_id = ? AND params_key = ?`,
       count,
       leader,
       gameId,
       paramsKey,
     );
+    return count;
   }
 
   // ---------- reports (club.md §17-3) ----------
@@ -601,7 +661,7 @@ export class Store {
       .map(toChallenge);
   }
 
-  /** Soft delete. Rankings are personal bests and stand on their own (club.md §16). */
+  /** Soft delete. Ranking rows are not bound to a challenge and stand on their own (club.md §16). */
   deleteChallenge(id: string, now: string): void {
     this.db.run(`UPDATE challenges SET deleted_at = ? WHERE id = ?`, now, id);
   }
@@ -766,24 +826,26 @@ export class Store {
 
   // ---------- rankings (club.md §16) ----------
 
-  rankingEntry(gameId: string, paramsKey: string, memberId: string): RankingEntryRow | null {
-    const row = this.db.get(
-      `SELECT * FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
-      gameId,
-      paramsKey,
-      memberId,
-    );
-    return row === undefined ? null : toRankingEntry(row);
-  }
-
   /**
-   * Stores a completed result as the member's row when the table has none of
-   * theirs or this one is STRICTLY better (an equal value keeps the earlier
-   * row). Every write takes the next `seq`, so equal values order by arrival.
-   * Keeps the table's summary row (count, leader) in step in O(1). Returns
-   * whether the table changed.
+   * Stores a completed result as a new row of its table — every finished game is a row
+   * (club.md §16-1). The row takes the next `seq` (meta `ranking_seq`, never reused), so
+   * equal values order by arrival, and the table's summary row (count, leader) follows in
+   * O(1). Then the member is held to `rowsPerMember` rows in the table: past it their worst
+   * row goes (the worst value, the latest on a tie) — which can be the row just stored, and
+   * then `entry` is null. `improved` says the row is strictly better than every other row of
+   * the member's in the table (a first row is; an equal one is not). Every read here walks an
+   * index to one row, except the cap's count, which stops at `rowsPerMember + 1`.
+   *
+   * With a `clientId` the call is idempotent per member (club.md §16-1): if the member already
+   * has a row with that key, nothing is written — not the row, not the counter, not the summary,
+   * not the cap — and that row comes back with `duplicate: true` and `improved: false`, so a
+   * result whose answer was lost can be sent again. One indexed read (`ranking_entries_client`)
+   * decides it. The row is looked up by the pair alone, so a key reused for another table
+   * answers with the stored row and its own table (`gameId` / `paramsKey` say which). Only a
+   * stored row is remembered: a result the cap dropped the moment it came in, or a row the
+   * member has since deleted, is not, and sending it again stores it afresh.
    */
-  offerRanking(input: {
+  addRanking(input: {
     gameId: string;
     paramsKey: string;
     memberId: string;
@@ -793,16 +855,52 @@ export class Store {
     seed: string;
     boardDigest: string | null;
     now: string;
-  }): boolean {
+    rowsPerMember: number;
+    /** The client's idempotency key for this result; none for a client that sends none. */
+    clientId?: string | null;
+  }): {
+    entry: RankingEntryRow | null;
+    improved: boolean;
+    entryCount: number;
+    /** True when the member's row with this `clientId` already existed and nothing was written. */
+    duplicate: boolean;
+    /** The table the answer is about: the input's, or the stored row's for a duplicate. */
+    gameId: string;
+    paramsKey: string;
+  } {
+    const clientId = input.clientId ?? null;
+    if (clientId !== null) {
+      const stored = this.db.get(
+        `SELECT * FROM ranking_entries WHERE member_id = ? AND client_id = ?`,
+        input.memberId,
+        clientId,
+      );
+      if (stored !== undefined) {
+        const gameId = text(stored, 'game_id');
+        const paramsKey = text(stored, 'params_key');
+        return {
+          entry: toRankingEntry(stored),
+          improved: false,
+          entryCount: this.rankingCount(gameId, paramsKey),
+          duplicate: true,
+          gameId,
+          paramsKey,
+        };
+      }
+    }
+    const fresh = { duplicate: false, gameId: input.gameId, paramsKey: input.paramsKey };
     const asc = directionOf(input.gameId) === 'asc';
     const isBetter = (value: number, than: number): boolean => (asc ? value < than : value > than);
-    const existing = this.db.get(
-      `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
+    // A row of theirs as good as this one or better: then this one is no improvement.
+    const asGood = this.db.get(
+      `SELECT 1 FROM ranking_entries
+       WHERE member_id = ? AND game_id = ? AND params_key = ? AND value ${asc ? '<=' : '>='} ?
+       LIMIT 1`,
+      input.memberId,
       input.gameId,
       input.paramsKey,
-      input.memberId,
+      input.value,
     );
-    if (existing !== undefined && !isBetter(input.value, Number(existing.value))) return false;
 
     // One writer per deployment, so read-increment-write needs no lock.
     const counter = this.db.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`);
@@ -812,73 +910,129 @@ export class Store {
        ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       String(seq),
     );
+    const factsJson = JSON.stringify(input.facts);
     this.db.run(
       `INSERT INTO ranking_entries
          (game_id, params_key, member_id, nickname, value, facts_json, seed, board_digest,
-          submitted_at, seq)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (game_id, params_key, member_id) DO UPDATE SET
-         nickname = excluded.nickname, value = excluded.value, facts_json = excluded.facts_json,
-         seed = excluded.seed, board_digest = excluded.board_digest,
-         submitted_at = excluded.submitted_at, seq = excluded.seq`,
+          submitted_at, seq, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.gameId,
       input.paramsKey,
       input.memberId,
       input.nickname,
       input.value,
-      JSON.stringify(input.facts),
+      factsJson,
       input.seed,
       input.boardDigest,
       input.now,
       seq,
+      clientId,
     );
+    const entry: RankingEntryRow = {
+      seq,
+      memberId: input.memberId,
+      nickname: input.nickname,
+      submittedAt: input.now,
+      facts: parseJson(factsJson),
+      seed: input.seed,
+      boardDigest: input.boardDigest,
+      value: input.value,
+    };
 
     const summary = this.db.get(
-      `SELECT leader_member_id FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
+      `SELECT entry_count, leader_seq FROM ranking_tables WHERE game_id = ? AND params_key = ?`,
       input.gameId,
       input.paramsKey,
     );
+    let entryCount: number;
     if (summary === undefined) {
       this.db.run(
-        `INSERT INTO ranking_tables (game_id, params_key, entry_count, leader_member_id)
+        `INSERT INTO ranking_tables (game_id, params_key, entry_count, leader_seq)
          VALUES (?, ?, 1, ?)`,
         input.gameId,
         input.paramsKey,
-        input.memberId,
+        seq,
       );
-      return true;
-    }
-    const leaderId = text(summary, 'leader_member_id');
-    let takesLead = leaderId === input.memberId;
-    if (!takesLead) {
-      const leader = this.db.get(
-        `SELECT value FROM ranking_entries WHERE game_id = ? AND params_key = ? AND member_id = ?`,
-        input.gameId,
-        input.paramsKey,
-        leaderId,
-      );
+      entryCount = 1;
+    } else {
+      const leaderSeq = int(summary, 'leader_seq');
+      const leader = this.db.get(`SELECT value FROM ranking_entries WHERE seq = ?`, leaderSeq);
       // Strictly better only: an equal value stays behind the earlier leader.
-      takesLead = leader === undefined || isBetter(input.value, Number(leader.value));
-    }
-    if (existing === undefined) {
+      const takesLead = leader === undefined || isBetter(input.value, Number(leader.value));
+      entryCount = int(summary, 'entry_count') + 1;
       this.db.run(
-        `UPDATE ranking_tables SET entry_count = entry_count + 1, leader_member_id = ?
+        `UPDATE ranking_tables SET entry_count = ?, leader_seq = ?
          WHERE game_id = ? AND params_key = ?`,
-        takesLead ? input.memberId : leaderId,
-        input.gameId,
-        input.paramsKey,
-      );
-    } else if (takesLead && leaderId !== input.memberId) {
-      // An improvement leaves the count alone: not naming `entry_count` keeps its index
-      // (`ranking_tables_popular`) from being rewritten for nothing.
-      this.db.run(
-        `UPDATE ranking_tables SET leader_member_id = ? WHERE game_id = ? AND params_key = ?`,
-        input.memberId,
+        entryCount,
+        takesLead ? seq : leaderSeq,
         input.gameId,
         input.paramsKey,
       );
     }
-    return true;
+
+    // The member's rows in this table, through the member index: in the steady state at
+    // most the cap and one, so the count reads that many rows. Every row past the cap goes,
+    // worst first — one row per result normally, but all of the excess at once when the cap
+    // was lowered after rows existed, so the configured bound holds from the next write.
+    const held = this.db.get(
+      `SELECT COUNT(*) AS n FROM ranking_entries
+       WHERE member_id = ? AND game_id = ? AND params_key = ?`,
+      input.memberId,
+      input.gameId,
+      input.paramsKey,
+    );
+    let excess = held === undefined ? 0 : int(held, 'n') - input.rowsPerMember;
+    if (excess > 0) {
+      const dropped: number[] = [];
+      while (excess > 0) {
+        const worst = this.memberRow(input.gameId, input.paramsKey, input.memberId, 'worst');
+        if (worst === null) break;
+        this.db.run(`DELETE FROM ranking_entries WHERE seq = ?`, worst.seq);
+        dropped.push(worst.seq);
+        excess -= 1;
+      }
+      entryCount = this.settleRankingTable(input.gameId, input.paramsKey, dropped);
+      if (dropped.includes(seq)) return { ...fresh, entry: null, improved: false, entryCount };
+    }
+    return { ...fresh, entry, improved: asGood === undefined, entryCount };
+  }
+
+  /** The member's best row in a table (the best value, the earliest on a tie), or null. */
+  bestOf(gameId: string, paramsKey: string, memberId: string): RankingEntryRow | null {
+    return this.memberRow(gameId, paramsKey, memberId, 'best');
+  }
+
+  /**
+   * The member's best or worst row in a table through `ranking_entries_member`: the extreme
+   * value (one index row), then the earliest (best) or latest (worst) row at it — the order
+   * `rankingTop` lists in, so the worst is the row that would be listed last.
+   */
+  private memberRow(
+    gameId: string,
+    paramsKey: string,
+    memberId: string,
+    which: 'best' | 'worst',
+  ): RankingEntryRow | null {
+    const asc = directionOf(gameId) === 'asc';
+    const lowest = asc === (which === 'best');
+    const extreme = this.db.get(
+      `SELECT value FROM ranking_entries WHERE member_id = ? AND game_id = ? AND params_key = ?
+       ORDER BY value ${lowest ? 'ASC' : 'DESC'} LIMIT 1`,
+      memberId,
+      gameId,
+      paramsKey,
+    );
+    if (extreme === undefined) return null;
+    const row = this.db.get(
+      `SELECT * FROM ranking_entries
+       WHERE member_id = ? AND game_id = ? AND params_key = ? AND value = ?
+       ORDER BY seq ${which === 'best' ? 'ASC' : 'DESC'} LIMIT 1`,
+      memberId,
+      gameId,
+      paramsKey,
+      Number(extreme.value),
+    );
+    return row === undefined ? null : toRankingEntry(row);
   }
 
   /** The table's row count, from its summary row. */
@@ -892,35 +1046,113 @@ export class Store {
   }
 
   /**
-   * 1 + the rows that are better, or equal and earlier (lower `seq`) — the
-   * order `rankingTop` lists in. Counts through the index and stops at
-   * `scanLimit` better rows: past that the rank is unknown and this returns
-   * `null`, as it does for a member with no row (limits.rankingRankScan).
+   * The rank of one row: 1 + the rows that are better, or equal and earlier (lower `seq`) —
+   * the order `rankingTop` lists in. Two range counts on `ranking_entries_table` (better
+   * values; then the equal value below this `seq`), not one `OR`, which node:sqlite's planner
+   * answered by counting the whole table. Each stops at what is left of `scanLimit`: at the
+   * ceiling the rank is unknown and this returns `null` (limits.rankingRankScan).
    */
-  rankOf(gameId: string, paramsKey: string, memberId: string, scanLimit: number): number | null {
-    const mine = this.db.get(
-      `SELECT value, seq FROM ranking_entries
-       WHERE game_id = ? AND params_key = ? AND member_id = ?`,
-      gameId,
-      paramsKey,
-      memberId,
-    );
-    if (mine === undefined) return null;
+  rankOf(
+    gameId: string,
+    paramsKey: string,
+    entry: { value: number; seq: number },
+    scanLimit: number,
+  ): number | null {
     const better = directionOf(gameId) === 'asc' ? '<' : '>';
-    const row = this.db.get(
+    const ahead = this.db.get(
       `SELECT COUNT(*) AS n FROM (
-         SELECT 1 FROM ranking_entries
-         WHERE game_id = ? AND params_key = ? AND (value ${better} ? OR (value = ? AND seq < ?))
+         SELECT 1 FROM ranking_entries WHERE game_id = ? AND params_key = ? AND value ${better} ?
          LIMIT ?)`,
       gameId,
       paramsKey,
-      Number(mine.value),
-      Number(mine.value),
-      Number(mine.seq),
+      entry.value,
       scanLimit,
     );
-    const n = row === undefined ? 0 : int(row, 'n');
+    let n = ahead === undefined ? 0 : int(ahead, 'n');
+    if (n >= scanLimit) return null;
+    const tiedEarlier = this.db.get(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT 1 FROM ranking_entries
+         WHERE game_id = ? AND params_key = ? AND value = ? AND seq < ?
+         LIMIT ?)`,
+      gameId,
+      paramsKey,
+      entry.value,
+      entry.seq,
+      scanLimit - n,
+    );
+    n += tiedEarlier === undefined ? 0 : int(tiedEarlier, 'n');
     return n >= scanLimit ? null : n + 1;
+  }
+
+  /**
+   * The nearest value strictly better than `value` in the table — "to the next rank" (club.md
+   * §16-2) — or null when none is. An equal value that arrived earlier does not count: the gap
+   * to it would be zero. One row off `ranking_entries_table`, walked from `value` outwards.
+   */
+  nextValue(gameId: string, paramsKey: string, value: number): number | null {
+    const asc = directionOf(gameId) === 'asc';
+    const row = this.db.get(
+      `SELECT value FROM ranking_entries
+       WHERE game_id = ? AND params_key = ? AND value ${asc ? '<' : '>'} ?
+       ORDER BY value ${asc ? 'DESC' : 'ASC'} LIMIT 1`,
+      gameId,
+      paramsKey,
+      value,
+    );
+    return row === undefined ? null : Number(row.value);
+  }
+
+  /** A member's best row in a table with its rank (counted to `scanLimit`) and the next value. */
+  standing(
+    gameId: string,
+    paramsKey: string,
+    entry: RankingEntryRow,
+    scanLimit: number,
+  ): RankingStandingRow {
+    return {
+      rank: this.rankOf(gameId, paramsKey, entry, scanLimit),
+      entry,
+      nextValue: this.nextValue(gameId, paramsKey, entry.value),
+    };
+  }
+
+  /**
+   * `GET /rankings/mine`: the tables the member has rows in, by game then mode, each with its
+   * count, its leader and the member's standing. The tables come from one walk of the member's
+   * own rows in `ranking_entries_member`; per table it is the summary row and the leader's row
+   * by key, the member's best (two index rows), a rank counted to `scanLimit`, and one row for
+   * the next value — nothing that grows with the club or with the table.
+   */
+  rankingsMine(memberId: string, scanLimit: number): RankingMineRow[] {
+    const tables = this.db.all(
+      `SELECT DISTINCT game_id, params_key FROM ranking_entries WHERE member_id = ?
+       ORDER BY game_id, params_key`,
+      memberId,
+    );
+    return tables.flatMap((table) => {
+      const gameId = text(table, 'game_id');
+      const paramsKey = text(table, 'params_key');
+      const summary = this.db.get(
+        `SELECT e.*, t.entry_count FROM ranking_tables t
+         JOIN ranking_entries e ON e.seq = t.leader_seq
+         WHERE t.game_id = ? AND t.params_key = ?`,
+        gameId,
+        paramsKey,
+      );
+      const best = this.bestOf(gameId, paramsKey, memberId);
+      // A row without its summary cannot happen; if it ever does there is nothing to show.
+      if (summary === undefined || best === null) return [];
+      return [
+        {
+          gameId,
+          paramsKey,
+          entryCount: int(summary, 'entry_count'),
+          leader: toRankingEntry(summary),
+          best: this.standing(gameId, paramsKey, best, scanLimit),
+        },
+      ];
+    });
   }
 
   /**
@@ -987,15 +1219,13 @@ export class Store {
 
   /**
    * One row per table with its leader: the summary table joined to the
-   * leader's row by primary key, so the cost is the number of tables.
+   * leader's row by its key (`leader_seq`), so the cost is the number of tables.
    */
   rankingTables(): RankingTableRow[] {
     return this.db
       .all(
         `SELECT e.*, t.entry_count FROM ranking_tables t
-         JOIN ranking_entries e
-           ON e.game_id = t.game_id AND e.params_key = t.params_key
-          AND e.member_id = t.leader_member_id
+         JOIN ranking_entries e ON e.seq = t.leader_seq
          ORDER BY t.game_id, t.params_key`,
       )
       .map((row) => ({

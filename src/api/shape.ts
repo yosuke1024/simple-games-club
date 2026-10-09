@@ -3,7 +3,14 @@
  * be renamed without the API noticing, and so the API can never leak a
  * column the contract does not name (a token hash, a revoked_at).
  */
-import type { ChallengeRow, ClubRow, MemberRow, RankingEntryRow, ResultRow } from '../db/store.js';
+import type {
+  ChallengeRow,
+  ClubRow,
+  MemberRow,
+  RankingEntryRow,
+  RankingStandingRow,
+  ResultRow,
+} from '../db/store.js';
 
 export const clubShape = (club: ClubRow) => ({
   id: club.id,
@@ -41,11 +48,20 @@ export const resultShape = (result: ResultRow) => ({
   facts: result.facts,
 });
 
+/** A ranking row (club.md §16-1). `id` is the row's arrival counter as a string. */
 export const rankingEntryShape = (entry: RankingEntryRow) => ({
+  id: String(entry.seq),
   memberId: entry.memberId,
   nickname: entry.nickname,
   submittedAt: entry.submittedAt,
   facts: entry.facts,
   seed: entry.seed,
   boardDigest: entry.boardDigest,
+});
+
+/** `me` of a table and `best` of `GET /rankings/mine`: the member's best row and where it stands. */
+export const rankingStandingShape = (standing: RankingStandingRow) => ({
+  rank: standing.rank,
+  entry: rankingEntryShape(standing.entry),
+  nextValue: standing.nextValue,
 });

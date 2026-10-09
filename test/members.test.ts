@@ -315,10 +315,12 @@ describe('DELETE /api/v1/members/:id?purge=1 (club.md §17-3)', () => {
         },
       });
     }
-    // Rankings: Ken leads sudoku/hard (Mai, Yoh behind) and is alone in 2048/default.
+    // Rankings: Ken leads sudoku/hard (Mai, Yoh behind; a second row of his among them) and
+    // is alone in 2048/default.
     await submitRanking(owner, 'sudoku', { elapsedSeconds: 300 }, 'hard');
     await submitRanking(ken, 'sudoku', { elapsedSeconds: 200 }, 'hard');
     await submitRanking(mai, 'sudoku', { elapsedSeconds: 250 }, 'hard');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 260 }, 'hard');
     await submitRanking(ken, '2048', { score: 900 });
     await report(mai, ken.memberId);
 
@@ -340,7 +342,7 @@ describe('DELETE /api/v1/members/:id?purge=1 (club.md §17-3)', () => {
     expect(results.json.map((r: { nickname: string }) => r.nickname)).toEqual(['Mai', 'Yoh']);
 
     const tables = await server.api('/api/v1/rankings', { token: owner.token });
-    // 2048/default had only Ken: gone. sudoku/hard: two rows, Mai leads now.
+    // 2048/default had only Ken: gone. sudoku/hard: both of Ken's rows gone, Mai leads now.
     expect(
       tables.json.map((t: { gameId: string; entryCount: number; leader: { nickname: string } }) => [
         t.gameId,
@@ -421,6 +423,7 @@ describe('PATCH /api/v1/me', () => {
     const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
     const challenge = await createChallenge(ken, 'seed-a', 300);
     await submitRanking(ken, 'sudoku', { elapsedSeconds: 300 }, 'hard');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 320 }, 'hard');
     await report(mai, ken.memberId);
 
     const renamed = await server.api('/api/v1/me', {
@@ -443,7 +446,11 @@ describe('PATCH /api/v1/me', () => {
     });
     expect(results.json[0].nickname).toBe('Kenji S');
     const table = await server.api('/api/v1/rankings/sudoku/hard', { token: owner.token });
-    expect(table.json.entries[0].nickname).toBe('Kenji S');
+    // Every row of his, not only the best.
+    expect(table.json.entries.map((e: { nickname: string }) => e.nickname)).toEqual([
+      'Kenji S',
+      'Kenji S',
+    ]);
     expect(
       (await server.api('/api/v1/rankings', { token: owner.token })).json[0].leader.nickname,
     ).toBe('Kenji S');

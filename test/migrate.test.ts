@@ -10,8 +10,11 @@ import {
   upgradeToV4,
   rerankResults,
   upgradeToV5,
+  upgradeToV6,
   type SqlDriver,
+  type SqlValue,
 } from '../src/db/driver.js';
+import { Store } from '../src/db/store.js';
 
 // The schema as v1 shipped it, copied here: the upgrade must work on exactly this.
 const V1_SCHEMA = `
@@ -46,8 +49,95 @@ CREATE TABLE results (
 );
 `;
 
+// The two ranking tables as v5 shipped them (one row per member), and their indexes.
+const V5_RANKINGS = `
+CREATE TABLE ranking_entries (
+  game_id TEXT NOT NULL, params_key TEXT NOT NULL, member_id TEXT NOT NULL REFERENCES members(id),
+  nickname TEXT NOT NULL, value REAL NOT NULL, facts_json TEXT NOT NULL, seed TEXT NOT NULL,
+  board_digest TEXT, submitted_at TEXT NOT NULL, seq INTEGER NOT NULL,
+  PRIMARY KEY (game_id, params_key, member_id)
+);
+CREATE TABLE ranking_tables (
+  game_id TEXT NOT NULL, params_key TEXT NOT NULL, entry_count INTEGER NOT NULL,
+  leader_member_id TEXT NOT NULL, PRIMARY KEY (game_id, params_key)
+);
+CREATE INDEX ranking_entries_table ON ranking_entries (game_id, params_key, value, seq);
+CREATE INDEX ranking_entries_member ON ranking_entries (member_id);
+CREATE INDEX ranking_tables_popular ON ranking_tables (entry_count DESC, game_id, params_key);
+`;
+
+/** v5 rows `[seq, game, mode, member, value]`: b bettered his sudoku row (seq 2 → 4). */
+const V5_ROWS: [number, string, string, string, number][] = [
+  [1, 'sudoku', 'hard', 'a', 300],
+  [3, 'sudoku', 'hard', 'c', 200],
+  [4, 'sudoku', 'hard', 'b', 200],
+  [5, '2048', 'default', 'a', 10],
+  [6, '2048', 'default', 'b', 90],
+  [7, '2048', 'default', 'c', 90],
+  [8, 'hearts', 'x', 'd', 5],
+];
+
 let dir: string;
 let db: DatabaseSync;
+
+/** A fresh database file behind a driver, without migrating it. */
+function openRaw(): SqlDriver {
+  dir = mkdtempSync(join(tmpdir(), 'sg-club-migrate-'));
+  db = new DatabaseSync(join(dir, 'club.sqlite'));
+  return {
+    exec: (script) => db.exec(script),
+    run: (sql, ...params) => {
+      db.prepare(sql).run(...params);
+    },
+    get: (sql, ...params) => db.prepare(sql).get(...params),
+    all: (sql, ...params) => db.prepare(sql).all(...params),
+  };
+}
+
+/** A current database made to look like v5: the v5 ranking tables, filled as v5 kept them. */
+function seedV5(d: SqlDriver): void {
+  migrate(d);
+  d.exec(`DROP TABLE ranking_entries`);
+  d.exec(`DROP TABLE ranking_tables`);
+  d.exec(V5_RANKINGS);
+  d.run(`UPDATE meta SET value = '5' WHERE key = 'schema_version'`);
+  for (const id of ['a', 'b', 'c', 'd']) {
+    d.run(
+      `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+      id,
+      `N${id}`,
+      `h${id}`,
+    );
+  }
+  for (const [seq, game, mode, member, value] of V5_ROWS) {
+    d.run(
+      `INSERT INTO ranking_entries VALUES (?, ?, ?, ?, ?, ?, '', NULL, ?, ?)`,
+      game,
+      mode,
+      member,
+      `N${member}`,
+      value,
+      `{"v":${value}}`,
+      `t${seq}`,
+      seq,
+    );
+  }
+  d.run(
+    `INSERT INTO ranking_tables VALUES
+       ('sudoku', 'hard', 3, 'c'), ('2048', 'default', 3, 'b'), ('hearts', 'x', 1, 'd')`,
+  );
+  d.run(
+    `INSERT INTO meta (key, value) VALUES ('ranking_seq', '9')
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  );
+}
+
+const keyOf = (d: SqlDriver, table: string): string[] =>
+  d
+    .all(`PRAGMA table_info(${table})`)
+    .filter((column) => Number(column.pk) > 0)
+    .map((column) => String(column.name));
+
 afterEach(() => {
   db.close();
   rmSync(dir, { recursive: true, force: true });
@@ -86,7 +176,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('5');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
     expect(d.get(`SELECT result_count, daily FROM challenges WHERE id = 'ch1'`)).toEqual({
       result_count: 2,
       daily: null,
@@ -120,7 +210,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('5');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'records'`)).toBeUndefined();
     expect(d.all(`SELECT * FROM ranking_entries`)).toEqual([]);
     expect(
@@ -358,6 +448,329 @@ describe('migrate() from schema 1', () => {
          ORDER BY entry_count DESC, game_id, params_key LIMIT 8`,
       ),
     ).toEqual([expect.stringContaining('ranking_tables_popular')]);
+  });
+
+  it('upgradeToV6 turns each v5 best into a first result row, names leaders by row, and rebuilds the member index', () => {
+    const d = openRaw();
+    seedV5(d);
+
+    migrate(d);
+    migrate(d); // idempotent
+    upgradeToV6(d); // and once more by hand: still the same
+
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
+    // Every row, as it was: the arrival counter is now the key.
+    expect(
+      d.all(
+        `SELECT seq, game_id, member_id, nickname, value, facts_json FROM ranking_entries ORDER BY seq`,
+      ),
+    ).toEqual(
+      V5_ROWS.map(([seq, game_id, , member_id, value]) => ({
+        seq,
+        game_id,
+        member_id,
+        nickname: `N${member_id}`,
+        value,
+        facts_json: `{"v":${value}}`,
+      })),
+    );
+    expect(keyOf(d, 'ranking_entries')).toEqual(['seq']);
+    expect(d.all(`PRAGMA table_info(ranking_entries_v5)`)).toEqual([]);
+    // Leaders by row: the best value, the earliest on a tie (c's 200 arrived before b's).
+    expect(
+      d.all(
+        `SELECT game_id, params_key, entry_count, leader_seq FROM ranking_tables ORDER BY game_id`,
+      ),
+    ).toEqual([
+      { game_id: '2048', params_key: 'default', entry_count: 3, leader_seq: 6 },
+      { game_id: 'hearts', params_key: 'x', entry_count: 1, leader_seq: 8 },
+      { game_id: 'sudoku', params_key: 'hard', entry_count: 3, leader_seq: 3 },
+    ]);
+    expect(
+      d.all(`PRAGMA table_info(ranking_tables)`).map((column) => String(column.name)),
+    ).not.toContain('leader_member_id');
+    expect(
+      d.all(`PRAGMA index_info(ranking_entries_member)`).map((column) => String(column.name)),
+    ).toEqual(['member_id', 'game_id', 'params_key', 'value']);
+    for (const index of ['ranking_entries_table', 'ranking_tables_popular']) {
+      expect(d.get(`SELECT name FROM sqlite_master WHERE name = ?`, index), index).toBeDefined();
+    }
+    // The counter is where v5 left it (a deleted row once took 9): the next row is 10.
+    expect(d.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`)?.value).toBe('9');
+
+    // The store reads the upgraded database: c plays again and is in the table twice.
+    const store = new Store(d);
+    const added = store.addRanking({
+      gameId: 'sudoku',
+      paramsKey: 'hard',
+      memberId: 'c',
+      nickname: 'Nc',
+      value: 250,
+      facts: { v: 250 },
+      seed: '',
+      boardDigest: null,
+      now: 't9',
+      rowsPerMember: 50,
+    });
+    expect(added).toMatchObject({ improved: false, entryCount: 4, entry: { seq: 10 } });
+    expect(store.rankingTop('sudoku', 'hard', 10).map((e) => [e.memberId, e.value])).toEqual([
+      ['c', 200],
+      ['b', 200],
+      ['c', 250],
+      ['a', 300],
+    ]);
+    expect(store.rankingTables().map((t) => [t.gameId, t.entryCount, t.leader.memberId])).toEqual([
+      ['2048', 3, 'b'],
+      ['hearts', 1, 'd'],
+      ['sudoku', 4, 'c'],
+    ]);
+  });
+
+  it('upgradeToV6 finishes a copy that stopped half-way, and moves the counter past every row', () => {
+    for (const stop of ['after the rename', 'after the copy'] as const) {
+      const d = openRaw();
+      seedV5(d);
+      d.run(`DELETE FROM meta WHERE key = 'ranking_seq'`); // a counter behind the rows
+      d.exec(`DROP INDEX ranking_entries_member`);
+      d.exec(`DROP INDEX ranking_entries_table`);
+      d.exec(`ALTER TABLE ranking_entries RENAME TO ranking_entries_v5`);
+      if (stop === 'after the copy') {
+        d.exec(`CREATE TABLE ranking_entries (
+          game_id TEXT NOT NULL, params_key TEXT NOT NULL, member_id TEXT NOT NULL,
+          nickname TEXT NOT NULL, value REAL NOT NULL, facts_json TEXT NOT NULL, seed TEXT NOT NULL,
+          board_digest TEXT, submitted_at TEXT NOT NULL, seq INTEGER PRIMARY KEY
+        )`);
+        d.exec(`INSERT INTO ranking_entries SELECT * FROM ranking_entries_v5`);
+      }
+      // The next start: SCHEMA_SQL makes an empty v6 table if there is none, then the upgrade.
+      migrate(d);
+      expect(d.all(`SELECT seq FROM ranking_entries ORDER BY seq`), stop).toEqual(
+        V5_ROWS.map(([seq]) => ({ seq })),
+      );
+      expect(d.all(`PRAGMA table_info(ranking_entries_v5)`), stop).toEqual([]);
+      expect(d.get(`SELECT value FROM meta WHERE key = 'ranking_seq'`)?.value, stop).toBe('8');
+      expect(d.get(`SELECT COUNT(*) AS n FROM ranking_tables`)?.n, stop).toBe(3);
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // afterEach closes the last one.
+    openRaw();
+  });
+
+  it('upgradeToV6 gives the copied rows no client_id, and the partial unique index lets a keyed result in once', () => {
+    const d = openRaw();
+    seedV5(d);
+    migrate(d);
+
+    expect(
+      d.all(`PRAGMA table_info(ranking_entries)`).map((column) => String(column.name)),
+    ).toContain('client_id');
+    expect(d.get(`SELECT COUNT(*) AS n FROM ranking_entries WHERE client_id IS NOT NULL`)?.n).toBe(
+      0,
+    );
+    // The index is unique over (member_id, client_id) and partial: rows without a key are not in it.
+    const index = d
+      .all(`PRAGMA index_list(ranking_entries)`)
+      .find((i) => i.name === 'ranking_entries_client');
+    expect(index).toMatchObject({ unique: 1, partial: 1 });
+    expect(
+      d.all(`PRAGMA index_info(ranking_entries_client)`).map((column) => String(column.name)),
+    ).toEqual(['member_id', 'client_id']);
+    expect(
+      String(
+        d.get(`SELECT sql FROM sqlite_master WHERE name = 'ranking_entries_client'`)?.sql,
+      ).replace(/\s+/g, ' '),
+    ).toContain('WHERE client_id IS NOT NULL');
+
+    // Rows with no key never collide, however many a member has; a key is stored once.
+    const store = new Store(d);
+    const add = (memberId: string, clientId?: string) =>
+      store.addRanking({
+        gameId: 'sudoku',
+        paramsKey: 'hard',
+        memberId,
+        nickname: `N${memberId}`,
+        value: 250,
+        facts: { v: 250 },
+        seed: '',
+        boardDigest: null,
+        now: 't9',
+        rowsPerMember: 50,
+        clientId,
+      });
+    expect(add('c').duplicate).toBe(false);
+    expect(add('c').duplicate).toBe(false); // no key: legacy behaviour, a row each time
+    const keyed = add('c', 'k-0123456789');
+    expect(keyed).toMatchObject({ duplicate: false, entryCount: 6 });
+    const resent = add('c', 'k-0123456789');
+    expect(resent).toMatchObject({ duplicate: true, improved: false, entryCount: 6 });
+    expect(resent.entry?.seq).toBe(keyed.entry?.seq);
+    // The key is per member.
+    expect(add('a', 'k-0123456789')).toMatchObject({ duplicate: false, entryCount: 7 });
+    // The unique index itself refuses a second row with the pair, whatever the store checks.
+    expect(() =>
+      d.run(
+        `INSERT INTO ranking_entries
+           (game_id, params_key, member_id, nickname, value, facts_json, seed, submitted_at, seq, client_id)
+         VALUES ('sudoku', 'hard', 'c', 'Nc', 1, '{}', '', 't', 999, 'k-0123456789')`,
+      ),
+    ).toThrow(/UNIQUE/);
+  });
+
+  it('adds client_id to a v6 database from before the key, keeps its rows, and runs again to the same result', () => {
+    const d = openRaw();
+    migrate(d);
+    for (const id of ['a', 'b']) {
+      d.run(
+        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+        id,
+        `N${id}`,
+        `h${id}`,
+      );
+    }
+    new Store(d).addRanking({
+      gameId: 'sudoku',
+      paramsKey: 'hard',
+      memberId: 'a',
+      nickname: 'Na',
+      value: 300,
+      facts: { v: 300 },
+      seed: '',
+      boardDigest: null,
+      now: 't1',
+      rowsPerMember: 50,
+    });
+    // The table as the unreleased v6 first had it: no client_id, no key index.
+    d.exec(`DROP INDEX ranking_entries_client`);
+    d.exec(`ALTER TABLE ranking_entries DROP COLUMN client_id`);
+    expect(
+      d.all(`PRAGMA table_info(ranking_entries)`).map((column) => String(column.name)),
+    ).not.toContain('client_id');
+
+    migrate(d);
+    migrate(d); // and again: nothing changes
+
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
+    expect(d.all(`SELECT seq, member_id, value, client_id FROM ranking_entries`)).toEqual([
+      { seq: 1, member_id: 'a', value: 300, client_id: null },
+    ]);
+    expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'ranking_entries_client'`)).toEqual({
+      name: 'ranking_entries_client',
+    });
+    const store = new Store(d);
+    const send = () =>
+      store.addRanking({
+        gameId: 'sudoku',
+        paramsKey: 'hard',
+        memberId: 'b',
+        nickname: 'Nb',
+        value: 200,
+        facts: { v: 200 },
+        seed: '',
+        boardDigest: null,
+        now: 't2',
+        rowsPerMember: 50,
+        clientId: 'after-upgrade-1',
+      });
+    expect(send()).toMatchObject({ duplicate: false, entryCount: 2, entry: { seq: 2 } });
+    expect(send()).toMatchObject({ duplicate: true, entryCount: 2, entry: { seq: 2 } });
+  });
+
+  it("reads a rank with two range counts and the member's rows off ranking_entries_member, never a scan or a sort", () => {
+    const d = openRaw();
+    migrate(d);
+    const issued: { sql: string; params: SqlValue[] }[] = [];
+    const spy: SqlDriver = {
+      exec: (script) => d.exec(script),
+      run: (sql, ...params) => {
+        issued.push({ sql, params });
+        d.run(sql, ...params);
+      },
+      get: (sql, ...params) => {
+        issued.push({ sql, params });
+        return d.get(sql, ...params);
+      },
+      all: (sql, ...params) => {
+        issued.push({ sql, params });
+        return d.all(sql, ...params);
+      },
+    };
+    d.run(
+      `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES ('m', 'm', 'member', 't', 'h')`,
+    );
+    const store = new Store(spy);
+    const plans = (): string[][] =>
+      issued
+        .filter(
+          ({ sql }) => /^\s*(SELECT|UPDATE|DELETE)/i.test(sql) && sql.includes('ranking_entries'),
+        )
+        .map(({ sql, params }) =>
+          d.all(`EXPLAIN QUERY PLAN ${sql}`, ...params).map((row) => String(row.detail)),
+        );
+    for (const gameId of ['sudoku', '2048']) {
+      const add = (value: number, clientId?: string) =>
+        store.addRanking({
+          gameId,
+          paramsKey: 'p',
+          memberId: 'm',
+          nickname: 'm',
+          value,
+          facts: {},
+          seed: '',
+          boardDigest: null,
+          now: 't',
+          rowsPerMember: 1,
+          clientId,
+        });
+      add(5);
+      add(7); // over the cap of one: the worst goes
+      const best = store.bestOf(gameId, 'p', 'm')!;
+      issued.length = 0;
+      store.rankOf(gameId, 'p', best, 1000);
+      // Both counts are ranges on the value, not the whole table (an OR of the two was).
+      expect(plans()).toEqual(
+        [
+          [
+            expect.stringMatching(
+              /ranking_entries_table \(game_id=\? AND params_key=\? AND value[<>]\?\)/,
+            ),
+          ],
+          [
+            expect.stringMatching(
+              /ranking_entries_table \(game_id=\? AND params_key=\? AND value=\? AND seq<\?\)/,
+            ),
+          ],
+        ].map((plan) => ['CO-ROUTINE (subquery-1)', ...plan, 'SCAN (subquery-1)']),
+      );
+      issued.length = 0;
+      add(6);
+      store.standing(gameId, 'p', best, 50);
+      store.rankingsMine('m', 50);
+      store.removeRankingEntryById(gameId, 'p', 'm', best.seq);
+      store.removeRankingEntries(gameId, 'p', 'm');
+      // A keyed result, then the same key again: the first finds no row and stores one, the
+      // second finds it by the key's own index and answers with it, writing nothing.
+      const first = add(1, `client-key-${gameId}`);
+      const again = add(1, `client-key-${gameId}`);
+      expect(first).toMatchObject({ duplicate: false, entryCount: 1 });
+      expect(again).toMatchObject({ duplicate: true, improved: false, entryCount: 1 });
+      expect(again.entry?.seq).toBe(first.entry?.seq);
+      const read = plans();
+      expect(read.length).toBeGreaterThan(15);
+      for (const plan of read) {
+        const text = plan.join(' | ');
+        expect(text).not.toMatch(/SCAN ranking_entries|TEMP B-TREE/);
+        // The key lookup is an equality on the partial unique index (one row); the rest of a
+        // member's reads walk `ranking_entries_member`.
+        if (/client_id=/.test(text)) {
+          expect(text).toMatch(/ranking_entries_client \(member_id=\? AND client_id=\?\)/);
+        } else if (/member_id=/.test(text)) {
+          expect(text).toContain('ranking_entries_member');
+        }
+      }
+      // It ran for the two sends with the key (the first finds nothing, the second the row).
+      expect(read.filter((plan) => /client_id=/.test(plan.join(' | ')))).toHaveLength(2);
+    }
   });
 
   it('refuses a database newer than this server', () => {
