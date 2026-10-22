@@ -8,6 +8,7 @@ import type {
   ClubRow,
   MemberRow,
   RankingEntryRow,
+  RankingMineRow,
   RankingStandingRow,
   ResultRow,
 } from '../db/store.js';
@@ -64,4 +65,16 @@ export const rankingStandingShape = (standing: RankingStandingRow) => ({
   rank: standing.rank,
   entry: rankingEntryShape(standing.entry),
   nextValue: standing.nextValue,
+});
+
+/**
+ * A table the member has rows in (club.md §5-4): `GET /rankings/mine` lists these for the
+ * caller and `GET /members/:id` for the member it names — one shape, so the two never differ.
+ */
+export const rankingMineShape = (table: RankingMineRow) => ({
+  gameId: table.gameId,
+  paramsKey: table.paramsKey,
+  entryCount: table.entryCount,
+  leader: rankingEntryShape(table.leader),
+  best: rankingStandingShape(table.best),
 });

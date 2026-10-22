@@ -186,6 +186,8 @@ PATCH  /api/v1/members/:id                   owner         { nickname } → Memb
 PATCH  /api/v1/me                            member        { nickname } → Member; renames the caller and the name on their results and ranking rows (same nickname rules as join). The reports against them stay (the owner's rename clears them; this does not)
 POST   /api/v1/members/:id/report            member        204; one report per reporter, a second changes nothing; 400 on yourself, 404 on an unknown or removed member
 GET    /api/v1/members/reported              owner         [{ member, reportCount }] — most reported first, then the oldest member
+GET    /api/v1/members[?before=<id>]         member        { members[], memberCount } — the newest 50 (`membersPage`), newest first; `before` (a member id, a removed one too) pages on to the 50 who joined before that member; 400 on an id the club never issued; memberCount: all active members
+GET    /api/v1/members/:id                   member        { member, rankings[] } — rankings: exactly what `GET /rankings/mine` gives that member (the tables they have rows in, same shape, same bounded reads); 404 on an unknown or removed member, `GET /members/reported` stays the owner's list
 GET    /api/v1/public[?date=YYYY-MM-DD]      no auth       { club: { name }, memberCount, today: [{ gameId, daily, resultCount, top: [{ nickname, facts }] }], rankings: [{ gameId, paramsKey, entryCount, leader: { nickname, facts }, top: [{ nickname, facts }] }] } — rankings: the 8 most-entered tables, `top` their best 3; 404 unless CLUB_OPEN_JOIN; Cache-Control: public, max-age=300 (the Worker caches it 5 minutes)
 ```
 

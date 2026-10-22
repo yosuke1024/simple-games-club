@@ -239,6 +239,209 @@ describe('POST /api/v1/members/:id/report and GET /api/v1/members/reported (club
   });
 });
 
+const memberNames = (reply: { json: { members: { nickname: string }[] } }) =>
+  reply.json.members.map((m) => m.nickname);
+
+describe('GET /api/v1/members/:id (club.md §5-3, §9)', () => {
+  it('answers who the member is and the tables they are in, the rows of their own /rankings/mine', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 300 }, 'hard');
+    const leader = await submitRanking(mai, 'sudoku', { elapsedSeconds: 250 }, 'hard');
+    await submitRanking(ken, '2048', { score: 50 });
+    await submitRanking(mai, 'sudoku', { elapsedSeconds: 90 }, 'easy'); // a table Ken is not in
+
+    const reply = await server.api(`/api/v1/members/${ken.memberId}`, { token: owner.token });
+    expect(reply.status).toBe(200);
+    expect(reply.json).toEqual({
+      member: { id: ken.memberId, nickname: 'Ken', role: 'member', joinedAt: expect.any(String) },
+      rankings: [
+        {
+          gameId: '2048',
+          paramsKey: 'default',
+          entryCount: 1,
+          leader: expect.objectContaining({ memberId: ken.memberId, facts: { score: 50 } }),
+          best: { rank: 1, entry: expect.any(Object), nextValue: null },
+        },
+        {
+          gameId: 'sudoku',
+          paramsKey: 'hard',
+          entryCount: 2,
+          leader: leader.json.entry,
+          best: { rank: 2, entry: expect.any(Object), nextValue: 250 },
+        },
+      ],
+    });
+    // The same rows Ken gets for himself, whoever asks.
+    const own = await server.api('/api/v1/rankings/mine', { token: ken.token });
+    expect(reply.json.rankings).toEqual(own.json);
+    const byMai = await server.api(`/api/v1/members/${ken.memberId}`, { token: mai.token });
+    expect(byMai.json).toEqual(reply.json);
+  });
+
+  it('answers for oneself: the same rankings as /rankings/mine, and the member', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    await submitRanking(owner, 'sudoku', { elapsedSeconds: 300 }, 'hard');
+    const reply = await server.api(`/api/v1/members/${owner.memberId}`, { token: owner.token });
+    expect(reply.status).toBe(200);
+    expect(reply.json.member).toEqual({
+      id: owner.memberId,
+      nickname: 'Yoh',
+      role: 'owner',
+      joinedAt: expect.any(String),
+    });
+    const mine = await server.api('/api/v1/rankings/mine', { token: owner.token });
+    expect(mine.json).toHaveLength(1);
+    expect(reply.json.rankings).toEqual(mine.json);
+  });
+
+  it('has no rankings for a member with no rows', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const reply = await server.api(`/api/v1/members/${ken.memberId}`, { token: owner.token });
+    expect(reply.status).toBe(200);
+    expect(reply.json).toEqual({
+      member: { id: ken.memberId, nickname: 'Ken', role: 'member', joinedAt: expect.any(String) },
+      rankings: [],
+    });
+  });
+
+  it('is a 404 for a removed member, with or without their results, and for an unknown id', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    await submitRanking(ken, 'sudoku', { elapsedSeconds: 300 }, 'hard');
+    await submitRanking(mai, 'sudoku', { elapsedSeconds: 250 }, 'hard');
+    expect((await server.api(`/api/v1/members/${ken.memberId}`, { token: mai.token })).status).toBe(
+      200,
+    );
+    await server.api(`/api/v1/members/${ken.memberId}`, { method: 'DELETE', token: owner.token });
+    await server.api(`/api/v1/members/${mai.memberId}?purge=1`, {
+      method: 'DELETE',
+      token: owner.token,
+    });
+    for (const id of [ken.memberId, mai.memberId, 'm_nope']) {
+      const reply = await server.api(`/api/v1/members/${id}`, { token: owner.token });
+      expect(reply.status).toBe(404);
+      expect(reply.json.error.code).toBe('not_found');
+    }
+  });
+
+  it("does not take 'reported' for an id: the owner gets the list, a member the owner-only 403", async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    const mai = await joinMember(server, owner, 'Mai', '203.0.113.2');
+    await report(mai, ken.memberId);
+    const list = await server.api('/api/v1/members/reported', { token: owner.token });
+    expect(list.status).toBe(200);
+    expect(list.json).toEqual([
+      {
+        member: { id: ken.memberId, nickname: 'Ken', role: 'member', joinedAt: expect.any(String) },
+        reportCount: 1,
+      },
+    ]);
+    expect((await server.api('/api/v1/members/reported', { token: mai.token })).status).toBe(403);
+  });
+
+  it('needs a live member token', async () => {
+    const owner = await claimOwner(server, 'Yoh');
+    const ken = await joinMember(server, owner, 'Ken', '203.0.113.1');
+    expect((await server.api(`/api/v1/members/${ken.memberId}`)).status).toBe(401);
+    await server.api(`/api/v1/members/${ken.memberId}`, { method: 'DELETE', token: owner.token });
+    expect(
+      (await server.api(`/api/v1/members/${owner.memberId}`, { token: ken.token })).status,
+    ).toBe(401);
+  });
+});
+
+describe('GET /api/v1/members?before= (club.md §17-2)', () => {
+  /** The owner and four members, oldest to newest: Yoh, Ken, Mai, Sam, Lee. */
+  const fill = async (): Promise<Record<'Yoh' | 'Ken' | 'Mai' | 'Sam' | 'Lee', Session>> => {
+    const Yoh = await claimOwner(server, 'Yoh');
+    const Ken = await joinMember(server, Yoh, 'Ken', '203.0.113.1');
+    const Mai = await joinMember(server, Yoh, 'Mai', '203.0.113.2');
+    const Sam = await joinMember(server, Yoh, 'Sam', '203.0.113.3');
+    const Lee = await joinMember(server, Yoh, 'Lee', '203.0.113.4');
+    return { Yoh, Ken, Mai, Sam, Lee };
+  };
+
+  it('without before is the first page of GET /club: the same members, newest first, and the total', async () => {
+    const { Yoh } = await fill();
+    const club = await server.api('/api/v1/club', { token: Yoh.token });
+    const first = await server.api('/api/v1/members', { token: Yoh.token });
+    expect(first.status).toBe(200);
+    expect(first.json).toEqual({ members: club.json.members, memberCount: 5 });
+    expect(memberNames(first)).toEqual(['Lee', 'Sam', 'Mai', 'Ken', 'Yoh']);
+    expect(first.json.members[0]).toEqual({
+      id: expect.any(String),
+      nickname: 'Lee',
+      role: 'member',
+      joinedAt: expect.any(String),
+    });
+  });
+
+  it('pages back from the member it is given: 2 + 2 + 1, the last page shorter, then none', async () => {
+    await server.reopen({ limits: { membersPage: 2 } });
+    const { Yoh, Mai, Sam, Ken } = await fill();
+    const page = (before?: string) =>
+      server.api(`/api/v1/members${before === undefined ? '' : `?before=${before}`}`, {
+        token: Yoh.token,
+      });
+    const club = await server.api('/api/v1/club', { token: Yoh.token });
+    const one = await page();
+    expect(one.json.members).toEqual(club.json.members);
+    expect(memberNames(one)).toEqual(['Lee', 'Sam']);
+    const two = await page(Sam.memberId);
+    expect(memberNames(two)).toEqual(['Mai', 'Ken']);
+    const three = await page(Ken.memberId);
+    expect(memberNames(three)).toEqual(['Yoh']);
+    expect((await page(Yoh.memberId)).json.members).toEqual([]);
+    // The total is every active member whichever page is asked for.
+    for (const reply of [one, two, three, await page(Mai.memberId)]) {
+      expect(reply.json.memberCount).toBe(5);
+    }
+  });
+
+  it('continues from a member who was removed meanwhile, and lists no removed member', async () => {
+    await server.reopen({ limits: { membersPage: 2 } });
+    const { Yoh, Mai, Sam } = await fill();
+    await server.api(`/api/v1/members/${Sam.memberId}`, { method: 'DELETE', token: Yoh.token });
+    const after = await server.api(`/api/v1/members?before=${Sam.memberId}`, { token: Yoh.token });
+    expect(after.status).toBe(200);
+    expect(memberNames(after)).toEqual(['Mai', 'Ken']);
+    expect(after.json.memberCount).toBe(4);
+    // Sam is not listed from a cursor before or after them, and Mai (removed too) is skipped.
+    await server.api(`/api/v1/members/${Mai.memberId}?purge=1`, {
+      method: 'DELETE',
+      token: Yoh.token,
+    });
+    const skipped = await server.api(`/api/v1/members?before=${Sam.memberId}`, {
+      token: Yoh.token,
+    });
+    expect(memberNames(skipped)).toEqual(['Ken', 'Yoh']);
+    expect(skipped.json.memberCount).toBe(3);
+    const first = await server.api('/api/v1/members', { token: Yoh.token });
+    expect(memberNames(first)).toEqual(['Lee', 'Ken']);
+  });
+
+  it('is a 400 for a before that is not a member of this club', async () => {
+    const { Yoh } = await fill();
+    for (const query of ['before=m_nope', 'before=', 'before=1']) {
+      const reply = await server.api(`/api/v1/members?${query}`, { token: Yoh.token });
+      expect(reply.status).toBe(400);
+      expect(reply.json.error.code).toBe('invalid_request');
+    }
+  });
+
+  it('needs a live member token', async () => {
+    const { Yoh, Lee } = await fill();
+    expect((await server.api('/api/v1/members')).status).toBe(401);
+    await server.api(`/api/v1/members/${Lee.memberId}`, { method: 'DELETE', token: Yoh.token });
+    expect((await server.api('/api/v1/members', { token: Lee.token })).status).toBe(401);
+  });
+});
+
 describe('PATCH /api/v1/members/:id (club.md §17-3)', () => {
   it('renames the member, their results and ranking rows, and clears their reports', async () => {
     const owner = await claimOwner(server, 'Yoh');
