@@ -332,8 +332,9 @@ the same table. The first five rows are results sent without a `clientId`:
   rows, at most 50 per table, and a rank counted to `rankingMineScan`), so it does not grow
   with the club or with the tables. `GET /members?before=<id>` reads the cursor's member row by
   its id, then `membersPage` (50) active members off the primary key below the cursor's `seq`
-  (a removed member inside the range is read and skipped; it is the walk of `GET /club`'s first
-  page, started lower), and `memberCount`, the same `COUNT(*)` over the active members that
+  (off the partial index `members_active`, which holds the active members alone, so a removed
+  member inside the range costs nothing; it is the walk of `GET /club`'s first page, started
+  lower), and `memberCount`, the same `COUNT(*)` over the active members that
   `GET /club` and `GET /public` run, which still grows with the club (see "One thing still grows
   with the club" above).
 - **The upgrade is one way, like schema 5's.** The object rebuilds both ranking tables on its

@@ -50,3 +50,34 @@ describe('MemberRow.seq', () => {
     expect(c!.seq).toBeLessThan(d!.seq);
   });
 });
+
+describe('members_active (the partial index of the active members)', () => {
+  it('is what newestMembers, membersBefore and countActive walk, so removed members cost nothing', () => {
+    const store = open();
+    for (const id of ['a', 'b', 'c']) {
+      store.createMember(id, id.toUpperCase(), 'member', `hash-${id}`, 't');
+    }
+    store.revokeMember('b', 't');
+    const plan = (sql: string, ...params: (string | number)[]) =>
+      db
+        .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .all(...params)
+        .map((row) => String((row as { detail: string }).detail))
+        .join(' | ');
+    expect(
+      plan(`SELECT * FROM members WHERE revoked_at IS NULL ORDER BY seq DESC LIMIT ?`, 50),
+    ).toContain('members_active');
+    expect(
+      plan(
+        `SELECT * FROM members WHERE revoked_at IS NULL AND seq < ? ORDER BY seq DESC LIMIT ?`,
+        3,
+        50,
+      ),
+    ).toContain('members_active');
+    expect(plan(`SELECT COUNT(*) AS n FROM members WHERE revoked_at IS NULL`)).toContain(
+      'members_active',
+    );
+    expect(store.membersBefore(3, 10).map((m) => m.id)).toEqual(['a']);
+    expect(store.countActive()).toBe(2);
+  });
+});

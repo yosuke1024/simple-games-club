@@ -247,3 +247,15 @@ CREATE INDEX IF NOT EXISTS results_member ON results (member_id);
 CREATE INDEX IF NOT EXISTS ranking_entries_member
   ON ranking_entries (member_id, game_id, params_key, value);
 `;
+
+/**
+ * The active members in arrival order, and nothing else: the walk of `GET /club`'s first page
+ * (`newestMembers`), of each older page (`membersBefore`, club.md §17-2) and the count behind
+ * `memberCount` (`countActive`). Partial, so a removed member is not in it at all — without
+ * this, a long run of removed members below a page's cursor is read and skipped one by one on
+ * the primary key, and `LIMIT` does not bound the rows read (Codex review, 2026-10-22). Created
+ * idempotently on every start like the others; one index row per active member.
+ */
+export const MEMBERS_ACTIVE_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS members_active ON members (seq) WHERE revoked_at IS NULL;
+`;
