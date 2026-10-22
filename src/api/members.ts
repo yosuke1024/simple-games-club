@@ -1,5 +1,8 @@
 /**
- * Members (club.md §5-3, §17-3). `DELETE /members/:id` stops the member's token
+ * Members (club.md §5-3, §17-3). `GET /members?before=` pages the member list past the
+ * newest `membersPage` that `GET /club` carries, and `GET /members/:id` is one member's view:
+ * their name and the tables they have rows in, read exactly as `GET /rankings/mine` reads the
+ * caller's own — nothing that grows with the club. `DELETE /members/:id` stops the member's token
  * at once and, without `?purge=1`, leaves their results under their nickname;
  * the last owner cannot be removed — recovery from that state is the setup key.
  * Reports and the owner's two remedies — rename, and remove with the work —
@@ -14,7 +17,7 @@ import { conflict, invalidRequest, notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
-import { memberShape } from './shape.js';
+import { memberShape, rankingMineShape } from './shape.js';
 
 export function registerMembers(router: Router, deps: Deps): void {
   const { store, limits } = deps;
@@ -32,8 +35,28 @@ export function registerMembers(router: Router, deps: Deps): void {
     return { status: 200, body: memberShape({ ...ctx.member!, nickname }) };
   });
 
-  // Registered before `/members/:id` routes: a literal segment never meets a `:id` match
-  // because the methods differ, but the order keeps the table easy to read.
+  // The member list past `GET /club`'s first page (club.md §17-2), newest first. `before` is the
+  // last member of the page the client holds. A removed member is still a cursor — the page
+  // must continue when its last member was removed meanwhile — so it is read with `memberById`,
+  // not `activeMember`; only an id the club never issued is a 400.
+  router.add('GET', '/api/v1/members', { auth: 'member', limit: 'member' }, (ctx) => {
+    const before = ctx.query.get('before');
+    let members;
+    if (before === null) {
+      members = store.newestMembers(limits.membersPage);
+    } else {
+      const cursor = store.memberById(before);
+      if (cursor === null) throw invalidRequest('before must be a member id');
+      members = store.membersBefore(cursor.seq, limits.membersPage);
+    }
+    return {
+      status: 200,
+      body: { members: members.map(memberShape), memberCount: store.countActive() },
+    };
+  });
+
+  // Registered before `/members/:id`: the routes match in order, first match wins, and this
+  // GET would otherwise take `reported` for an id (and answer a 404 to the owner).
   router.add('GET', '/api/v1/members/reported', { auth: 'owner', limit: 'member' }, () => ({
     status: 200,
     body: store.reportedMembers(limits.membersPage).map((row) => ({
@@ -41,6 +64,20 @@ export function registerMembers(router: Router, deps: Deps): void {
       reportCount: row.reportCount,
     })),
   }));
+
+  // One member's view (club.md §5-3, §9): who they are and the tables they are in, the same rows
+  // `GET /rankings/mine` gives the caller. Any member may ask about any active member, themselves
+  // included; a removed or unknown one is a 404.
+  router.add('GET', '/api/v1/members/:id', { auth: 'member', limit: 'member' }, (ctx) => {
+    const member = activeMember(ctx.params.id!);
+    return {
+      status: 200,
+      body: {
+        member: memberShape(member),
+        rankings: store.rankingsMine(member.id, limits.rankingMineScan).map(rankingMineShape),
+      },
+    };
+  });
 
   router.add('POST', '/api/v1/members/:id/report', { auth: 'member', limit: 'member' }, (ctx) => {
     const target = activeMember(ctx.params.id!);

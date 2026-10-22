@@ -326,6 +326,16 @@ the same table. The first five rows are results sent without a `clientId`:
   `rankingMineScan` (50) per table in `/rankings/mine`, past which the rank is `null`.
   `/rankings/mine` also walks the member's own rows once to find their tables, at most 50 per
   table.
+- **`GET /members/:id` and `GET /members?before=<id>` were not measured; their reads follow
+  from the queries.** `GET /members/:id` reads the member's row by its id and then what
+  `GET /rankings/mine` reads for that member (the `/rankings/mine` rows above: the member's own
+  rows, at most 50 per table, and a rank counted to `rankingMineScan`), so it does not grow
+  with the club or with the tables. `GET /members?before=<id>` reads the cursor's member row by
+  its id, then `membersPage` (50) active members off the primary key below the cursor's `seq`
+  (a removed member inside the range is read and skipped; it is the walk of `GET /club`'s first
+  page, started lower), and `memberCount`, the same `COUNT(*)` over the active members that
+  `GET /club` and `GET /public` run, which still grows with the club (see "One thing still grows
+  with the club" above).
 - **The upgrade is one way, like schema 5's.** The object rebuilds both ranking tables on its
   first request after the deploy (`upgradeToV6`: the v5 table renamed aside, every row copied
   with its `seq`, the summaries rebuilt from the rows; rows written proportional to the rows

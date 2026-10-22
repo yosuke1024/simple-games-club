@@ -16,6 +16,8 @@ export interface ClubRow {
 }
 
 export interface MemberRow {
+  /** Arrival order (`members.seq`): the cursor of `GET /members?before=`. Never on the wire. */
+  seq: number;
   id: string;
   nickname: string;
   role: Role;
@@ -153,6 +155,7 @@ const toClub = (row: Row): ClubRow => ({
 });
 
 const toMember = (row: Row): MemberRow => ({
+  seq: int(row, 'seq'),
   id: text(row, 'id'),
   nickname: text(row, 'nickname'),
   role: text(row, 'role') as Role,
@@ -263,6 +266,23 @@ export class Store {
       .map(toMember);
   }
 
+  /**
+   * The active members who joined before the member with arrival number `seq`, newest first,
+   * at most `limit` (club.md §5-3, §17-2): the next page of `GET /members?before=`. `seq` is the
+   * cursor's own, and the cursor may be a removed member — that is why it is a number the caller
+   * took from `memberById` and not a join on active members. One walk of the primary key from
+   * the cursor down, reading about `limit` rows whatever the club's size.
+   */
+  membersBefore(seq: number, limit: number): MemberRow[] {
+    return this.db
+      .all(
+        `SELECT * FROM members WHERE revoked_at IS NULL AND seq < ? ORDER BY seq DESC LIMIT ?`,
+        seq,
+        limit,
+      )
+      .map(toMember);
+  }
+
   memberById(id: string): MemberRow | null {
     const row = this.db.get(`SELECT * FROM members WHERE id = ?`, id);
     return row === undefined ? null : toMember(row);
@@ -303,7 +323,16 @@ export class Store {
       now,
       tokenHash,
     );
-    return { id, nickname, role, joinedAt: now, revokedAt: null };
+    // The row's arrival number comes from the connection, not from a read of the table.
+    const inserted = this.db.get(`SELECT last_insert_rowid() AS seq`);
+    return {
+      seq: inserted === undefined ? 0 : int(inserted, 'seq'),
+      id,
+      nickname,
+      role,
+      joinedAt: now,
+      revokedAt: null,
+    };
   }
 
   revokeMember(id: string, now: string): void {

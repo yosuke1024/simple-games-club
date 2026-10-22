@@ -14,7 +14,7 @@ import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { axisValue, contractOf } from '../contracts/games.js';
 import { iso, type Deps } from './deps.js';
-import { rankingEntryShape, rankingStandingShape } from './shape.js';
+import { rankingEntryShape, rankingMineShape, rankingStandingShape } from './shape.js';
 
 /** A row id as the wire carries it (`Entry.id`): a positive integer in decimal, or nothing. */
 const rowId = (raw: string | undefined): number | null => {
@@ -110,13 +110,7 @@ export function registerRankings(router: Router, deps: Deps): void {
   // two never meet (four path segments here, five there), but the literal reads first.
   router.add('GET', '/api/v1/rankings/mine', { auth: 'member', limit: 'member' }, (ctx) => ({
     status: 200,
-    body: store.rankingsMine(ctx.member!.id, limits.rankingMineScan).map((table) => ({
-      gameId: table.gameId,
-      paramsKey: table.paramsKey,
-      entryCount: table.entryCount,
-      leader: rankingEntryShape(table.leader),
-      best: rankingStandingShape(table.best),
-    })),
+    body: store.rankingsMine(ctx.member!.id, limits.rankingMineScan).map(rankingMineShape),
   }));
 
   router.add(
