@@ -174,4 +174,21 @@ describe('wrangler.toml (the Cloudflare deployment)', () => {
     expect(toml).toMatch(/new_sqlite_classes\s*=\s*\[\s*"ClubObject"\s*\]/);
     expect(toml).not.toMatch(/new_classes\s*=/);
   });
+
+  it('adds managed hosting as migration v2, leaving the applied v1 as it was', () => {
+    // v1 is live on club.pixapps.ai; editing it instead of adding a tag would not migrate.
+    expect(toml).toMatch(/tag\s*=\s*"v1"\s*\nnew_sqlite_classes\s*=\s*\[\s*"ClubObject"\s*\]/);
+    expect(toml).toMatch(
+      /tag\s*=\s*"v2"\s*\nnew_sqlite_classes\s*=\s*\[\s*"ManagedDirectoryObject",\s*"ManagedClubObject"\s*\]/,
+    );
+  });
+
+  it('serves managed Club Houses on the Public origin', () => {
+    expect(toml).toMatch(/^\s*CLUB_MANAGED_ENABLED\s*=\s*"1"/m);
+    expect(toml).toMatch(/^\s*CLUB_PUBLIC_ORIGIN\s*=\s*"https:\/\/club\.pixapps\.ai"/m);
+    expect(toml).toMatch(/run_worker_first\s*=\s*\[[^\]]*"\/clubs\/\*"/);
+    // The managed secrets are set on the deployment, never written here.
+    expect(toml).not.toMatch(/^\s*CLUB_MANAGED_SECRET\s*=/m);
+    expect(toml).not.toMatch(/^\s*CLUB_MANAGED_ADMIN_KEY\s*=/m);
+  });
 });

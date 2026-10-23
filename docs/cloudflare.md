@@ -2,7 +2,8 @@
 
 > **2026-10-23 implementation amendment:** this document records the original
 > single-public-club spike and its dated measurements. Managed multi-club hosting
-> uses a separate configuration and registry object; see [managed.md](managed.md).
+> runs in this same deployment (`wrangler.toml`, migration `v2`) with its own registry
+> and club objects; see [managed.md](managed.md).
 > The current implementation returns `/api/v1/public` with `Cache-Control: no-store`
 > so a club made private is not served from the former five-minute cache. Therefore
 > cached-public-feed measurements below are historical, not a cost estimate for

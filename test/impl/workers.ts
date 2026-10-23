@@ -23,13 +23,7 @@ import {
   type ServerOptions,
   type TestServer,
 } from '../helpers.js';
-import {
-  OPTIONS_FILE,
-  OUT_DIR,
-  ROOT,
-  MANAGED_OPTIONS_FILE,
-  MANAGED_OUT_DIR,
-} from '../workers/globalSetup.js';
+import { OPTIONS_FILE, OUT_DIR, ROOT } from '../workers/globalSetup.js';
 
 type Bindings = Record<string, string>;
 
@@ -59,9 +53,7 @@ export async function startWorkersServer(overrides: Partial<ServerOptions>): Pro
   const dir = mkdtempSync(join(tmpdir(), 'sg-club-do-'));
   const clock = newClock();
   let options: ServerOptions = { ...DEFAULTS, ...overrides };
-  const fromWrangler = JSON.parse(
-    readFileSync(options.managed ? MANAGED_OPTIONS_FILE : OPTIONS_FILE, 'utf8'),
-  ) as V4WorkerOptions;
+  const fromWrangler = JSON.parse(readFileSync(OPTIONS_FILE, 'utf8')) as V4WorkerOptions;
 
   const miniflareOptions = () =>
     convertV4MiniflareOptions({
@@ -71,7 +63,7 @@ export async function startWorkersServer(overrides: Partial<ServerOptions>): Pro
           rootPath: ROOT,
           modulesRoot: ROOT,
           modules: true,
-          scriptPath: join(options.managed ? MANAGED_OUT_DIR : OUT_DIR, 'index.js'),
+          scriptPath: join(OUT_DIR, 'index.js'),
           // wrangler.toml's [vars] are replaced, not merged: the tests choose every value.
           bindings: bindingsFor(options),
         } as V4WorkerOptions,

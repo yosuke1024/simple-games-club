@@ -1,0 +1,58 @@
+# The staging deployment: the same Worker as wrangler.toml (Public Club House and
+# managed Club Houses on one origin) on its workers.dev address, with its own
+# Durable Objects, so a release can be walked through end to end — create a Trial,
+# invite, join, play — before club.pixapps.ai changes. Keep it in step with
+# wrangler.toml; only the address, the object name and the client origins differ.
+#
+# Set on this deployment (never the production values):
+#   wrangler secret put CLUB_MANAGED_SECRET --config wrangler.staging.toml
+#   wrangler secret put CLUB_MANAGED_ADMIN_KEY --config wrangler.staging.toml
+#   wrangler secret put CLUB_SETUP_KEY --config wrangler.staging.toml   # to claim the Public club
+name = "simple-games-club-staging"
+main = "src/worker/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# No custom domain: invite links and endpoints name the request's own origin,
+# https://simple-games-club-staging.<account>.workers.dev.
+workers_dev = true
+
+[assets]
+directory = "./web"
+binding = "ASSETS"
+not_found_handling = "none"
+run_worker_first = ["/api/*", "/clubs/*", "/", "/index.html", "/join", "/join/"]
+
+[[durable_objects.bindings]]
+name = "CLUB"
+class_name = "ClubObject"
+
+[[durable_objects.bindings]]
+name = "MANAGED_DIRECTORY"
+class_name = "ManagedDirectoryObject"
+
+[[durable_objects.bindings]]
+name = "MANAGED_CLUB"
+class_name = "ManagedClubObject"
+
+# The same tags as wrangler.toml, so the step from v1 to v2 is rehearsed here too.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ClubObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ManagedDirectoryObject", "ManagedClubObject"]
+
+[vars]
+CLUB_OBJECT_NAME = "club-staging"
+CLUB_OPEN_JOIN = "1"
+CLUB_LIMITS = '{"maxMembers": 10000}'
+CLUB_HOSTING_PROVIDER = "cloudflare"
+CLUB_MANAGED_ENABLED = "1"
+# The web build served by this Worker is same-origin; the Vite dev server is the
+# only other client a staging check needs.
+CLUB_CORS_ORIGINS = "http://localhost:5173"
+
+[observability]
+enabled = true

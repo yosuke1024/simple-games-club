@@ -8,7 +8,7 @@ export default tseslint.config(
     ignores: [
       'dist/',
       'dist-worker/',
-      'dist-worker-managed/',
+      'dist-worker-staging/',
       '.wrangler/',
       'node_modules/',
       'web/',

@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:worker": "wrangler deploy --dry-run --outdir dist-worker",
-    "build:managed": "wrangler deploy --dry-run --config wrangler.managed.toml --outdir dist-worker-managed",
+    "build:staging": "wrangler deploy --dry-run --config wrangler.staging.toml --outdir dist-worker-staging",
     "start": "node --disable-warning=ExperimentalWarning dist/server.js",
     "dev": "pnpm build && CLUB_DATA_DIR=./data pnpm start",
     "dev:worker": "wrangler dev",

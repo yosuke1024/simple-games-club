@@ -12,13 +12,14 @@ import { unstable_getMiniflareWorkerOptions } from 'wrangler';
 export const ROOT = join(import.meta.dirname, '..', '..');
 export const OUT_DIR = join(ROOT, 'dist-worker');
 export const OPTIONS_FILE = join(OUT_DIR, 'miniflare-options.json');
-export const MANAGED_OUT_DIR = join(ROOT, 'dist-worker-managed');
-export const MANAGED_OPTIONS_FILE = join(MANAGED_OUT_DIR, 'miniflare-options.json');
+/** Bundled only to validate it; the tests run the production file, which carries managed too. */
+const STAGING_OUT_DIR = join(ROOT, 'dist-worker-staging');
+const STAGING_OPTIONS_FILE = join(STAGING_OUT_DIR, 'miniflare-options.json');
 
 export default function setup(): void {
   for (const [config, output, optionsFile] of [
     ['wrangler.toml', OUT_DIR, OPTIONS_FILE],
-    ['wrangler.managed.toml', MANAGED_OUT_DIR, MANAGED_OPTIONS_FILE],
+    ['wrangler.staging.toml', STAGING_OUT_DIR, STAGING_OPTIONS_FILE],
   ] as const) {
     execFileSync(
       join(ROOT, 'node_modules', '.bin', 'wrangler'),

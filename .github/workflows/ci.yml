@@ -30,7 +30,7 @@ jobs:
       - run: pnpm build:worker
         env:
           WRANGLER_SEND_METRICS: 'false'
-      - run: pnpm build:managed
+      - run: pnpm build:staging
         env:
           WRANGLER_SEND_METRICS: 'false'
 

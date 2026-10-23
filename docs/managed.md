@@ -44,17 +44,26 @@ charging, renewals and customer support must be connected before a paid launch.
 
 ## Configuration and isolation
 
-Cloudflare uses the independent `wrangler.managed.toml`, not a change to the
-existing public deployment in `wrangler.toml`.
+Cloudflare serves managed hosting from the existing deployment in `wrangler.toml`, on the
+Public Club House's origin `https://club.pixapps.ai` (decision 2026-10-24: one Club House
+service, not two addresses). Managed requests are `/api/v1/managed/*` and `/clubs/*`; the
+Public club keeps `/api/*` and its own Durable Object. The managed classes are added as
+migration `v2`; `v1` is never edited. `wrangler.staging.toml` is the same Worker on its
+workers.dev address with its own objects and secrets, for walking a release through before
+club.pixapps.ai changes.
 
-| Setting                           | Purpose                                                                                               |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `CLUB_MANAGED_ENABLED=1`          | Explicitly enables the managed API                                                                    |
-| `CLUB_MANAGED_SECRET`             | Stable 32+ character secret for registry token hashes and derived holder credentials                  |
-| `CLUB_MANAGED_ADMIN_KEY`          | Separate 32+ character operator credential; must differ from the secret                               |
-| `CLUB_PUBLIC_ORIGIN`              | Public service origin for generated endpoints and invite links; configure for the intended deployment |
-| `CLUB_CORS_ORIGINS`               | Allowed client origins; the managed example allows `https://pixapps.ai`                               |
-| Client `VITE_MANAGED_CLUB_ORIGIN` | Opt-in build-time service origin; unset keeps managed entry points disabled                           |
+Before deploying `wrangler.toml` with managed hosting, put both managed secrets on the
+`simple-games-club` Worker. Without them the managed routes answer 500; the Public club
+is unaffected.
+
+| Setting                        | Purpose                                                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `CLUB_MANAGED_ENABLED=1`       | Explicitly enables the managed API                                                        |
+| `CLUB_MANAGED_SECRET`          | Stable 32+ character secret for registry token hashes and derived holder credentials      |
+| `CLUB_MANAGED_ADMIN_KEY`       | Separate 32+ character operator credential; must differ from the secret                   |
+| `CLUB_PUBLIC_ORIGIN`           | Public service origin for generated endpoints and invite links: `https://club.pixapps.ai` |
+| `CLUB_CORS_ORIGINS`            | Allowed client origins; the managed example allows `https://pixapps.ai`                   |
+| Client `MANAGED_CLUBS_ENABLED` | Code constant in simple-games `ui/clubFeatures.ts`; the origin is the Public Club House's |
 
 Do not put either server secret in a client build. The client generates its own
 Trial owner key, or receives an operator-issued key, then obtains separate member credentials scoped to each club. The directory
@@ -201,7 +210,7 @@ Trial bootstrap/idempotency, quota races, upgrades with preserved records and ke
 admission, private discovery, cross-club credential isolation, 49/50-member benefit
 transitions, expiry, reconnect, credential rotation and deletion propagation. Store-level
 crash and concurrency tests run on Node. `pnpm typecheck`, `pnpm lint` and
-`pnpm format:check` cover the source. `pnpm build:worker` and `pnpm build:managed`
+`pnpm format:check` cover the source. `pnpm build:worker` and `pnpm build:staging`
 are dry runs and do not deploy. CI performs both Worker builds.
 
 No production deployment, secret configuration, customer entitlement or charge is

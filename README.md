@@ -23,8 +23,9 @@ this server implements.
 **Status: pre-release.** The client side (`src/club/` in simple-games) is not
 shipped yet. This server exists so it can be built against something real.
 
-**Managed hosting implementation preview (2026-10-23):** an independent Cloudflare
-deployment can host multiple owner-created clubs. Free, self-service Trial allows
+**Managed hosting implementation preview (2026-10-23):** the Cloudflare deployment
+at club.pixapps.ai also hosts multiple owner-created clubs, beside the Public club on the
+same origin (`/clubs/<id>`, decision 2026-10-24). Free, self-service Trial allows
 one club of five members with no automatic expiration. Basic allows three clubs of
 50 active members each, including the owner; future Plus and MAX definitions are
 present but unavailable. The matching client and product contract live in
