@@ -13,11 +13,12 @@
  * the reports against the member — a name change must not reset the count. Deleting
  * one's own records is per record, next to the records (rankings.ts, challenges.ts).
  */
-import { conflict, invalidRequest, notFound } from '../http/errors.js';
+import { conflict, forbidden, invalidRequest, notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
 import { memberShape, rankingMineShape } from './shape.js';
+import { gameFilter } from './settings.js';
 
 export function registerMembers(router: Router, deps: Deps): void {
   const { store, limits } = deps;
@@ -74,7 +75,10 @@ export function registerMembers(router: Router, deps: Deps): void {
       status: 200,
       body: {
         member: memberShape(member),
-        rankings: store.rankingsMine(member.id, limits.rankingMineScan).map(rankingMineShape),
+        rankings: store
+          .rankingsMine(member.id, limits.rankingMineScan)
+          .filter(gameFilter(deps))
+          .map(rankingMineShape),
       },
     };
   });
@@ -96,6 +100,9 @@ export function registerMembers(router: Router, deps: Deps): void {
 
   router.add('DELETE', '/api/v1/members/:id', { auth: 'owner', limit: 'member' }, (ctx) => {
     const target = activeMember(ctx.params.id!);
+    if (target.id === deps.config.managedOwnerMemberId) {
+      throw forbidden('the subscription holder cannot be removed from their club');
+    }
     const purge = ctx.query.get('purge');
     if (purge !== null && purge !== '0' && purge !== '1') {
       throw invalidRequest('purge must be 0 or 1');

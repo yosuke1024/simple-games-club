@@ -2,7 +2,7 @@
 
 The server behind **Club House**, the optional layer of
 [Simple Games by PixApps](https://github.com/yosuke1024/simple-games).
-One deployment is one club: people playing the same puzzles on their own
+In self-hosted mode, one deployment is one club: people playing the same puzzles on their own
 devices and bringing only the results together. It runs in two shapes from the
 same source — a Node process with a SQLite file, or a Cloudflare Worker with a
 Durable Object — and the same contract tests prove both.
@@ -15,13 +15,22 @@ passwords or e-mail addresses, no notifications, and nothing runs in the
 background. Results are compared only within one challenge — the same board,
 the same mode — and nothing accumulates across challenges.
 
-Whoever creates a club hosts it, pays for it and can delete it. The product
+In self-hosted mode, whoever creates a club hosts it, pays for it and can delete it. The product
 decisions live in the simple-games repository: `docs/PRODUCT_PRINCIPLES.md`
 「Club House」 draws the boundary, `docs/architecture/club.md` is the contract
 this server implements.
 
 **Status: pre-release.** The client side (`src/club/` in simple-games) is not
 shipped yet. This server exists so it can be built against something real.
+
+**Managed hosting implementation preview (2026-10-23):** an independent Cloudflare
+deployment can host multiple owner-created clubs. Basic allows three clubs of
+50 active members each, including the owner; future Plus and MAX definitions are
+present but unavailable. The matching client and product contract live in
+simple-games `docs/architecture/managed-clubs.md`. See [the managed runbook](docs/managed.md)
+for configuration, operator-issued entitlements, access-key recovery and release
+gates. Pricing and checkout are not implemented, and this does not deploy or alter
+the existing public service.
 
 ## Deploy
 

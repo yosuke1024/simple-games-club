@@ -11,7 +11,10 @@
  * except the member invite token, which the owner has to be able to read
  * back and hand out again (club.md §5-1), so it is stored as issued.
  */
-export const SCHEMA_VERSION = 6;
+import { OWNER_RECORDS_SQL } from './ownerRecordsSchema.js';
+import { POLICY_SQL } from './policySchema.js';
+
+export const SCHEMA_VERSION = 7;
 
 /*
  * v2 (the Public deployment, club.md §5-4): `challenges.daily` tags a board as
@@ -183,6 +186,9 @@ CREATE TABLE IF NOT EXISTS reports (
   created_at TEXT NOT NULL,
   PRIMARY KEY (target_id, reporter_id)
 );
+
+${POLICY_SQL}
+${OWNER_RECORDS_SQL}
 `;
 
 /**

@@ -7,10 +7,16 @@
  */
 import type { ApiConfig, HostingConfig } from '../api/deps.js';
 import { DEFAULT_LIMITS, type Limits } from '../limits.js';
+import type { ManagedDirectoryObject, ManagedClubObject } from './managed.js';
 
 export interface Env {
   /** The Durable Object namespace — one object per club (wrangler.toml). */
   CLUB: DurableObjectNamespace;
+  MANAGED_DIRECTORY?: DurableObjectNamespace<ManagedDirectoryObject>;
+  MANAGED_CLUB?: DurableObjectNamespace<ManagedClubObject>;
+  CLUB_MANAGED_ENABLED?: string;
+  CLUB_MANAGED_SECRET?: string;
+  CLUB_MANAGED_ADMIN_KEY?: string;
   /** The Simple Games web build, when wrangler.toml's `[assets]` has one to serve. */
   ASSETS?: Fetcher;
   /**

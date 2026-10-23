@@ -3,6 +3,8 @@
  */
 import { contractOf, resultRank, type Direction } from '../contracts/games.js';
 import type { Row, SqlDriver } from './driver.js';
+import { PolicyStore } from './policy.js';
+import { OwnerRecordStore } from './ownerRecords.js';
 
 export type Role = 'owner' | 'member';
 export type Outcome = 'completed' | 'played';
@@ -224,7 +226,13 @@ const CHALLENGE_SELECT = `
   WHERE c.deleted_at IS NULL`;
 
 export class Store {
-  constructor(private readonly db: SqlDriver) {}
+  readonly policy: PolicyStore;
+  readonly ownerRecords: OwnerRecordStore;
+
+  constructor(private readonly db: SqlDriver) {
+    this.policy = new PolicyStore(db);
+    this.ownerRecords = new OwnerRecordStore(db);
+  }
 
   // ---------- club ----------
 
@@ -673,9 +681,15 @@ export class Store {
     afterId: string | null,
     limit: number,
     daily: string | null = null,
+    allowedGameIds: readonly string[] | null = null,
   ): ChallengeRow[] {
+    if (allowedGameIds?.length === 0) return [];
     const bindings: (string | number)[] = [viewerId];
     let where = '';
+    if (allowedGameIds !== null) {
+      where += ' AND c.game_id IN (SELECT value FROM json_each(?))';
+      bindings.push(JSON.stringify(allowedGameIds));
+    }
     if (daily !== null) {
       where += ' AND c.daily = ?';
       bindings.push(daily);

@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import { randomHex } from './auth/tokens.js';
 
 import type { ApiConfig, HostingConfig } from './api/deps.js';
+import { managedConfigFrom, type ManagedConfig } from './managed/api.js';
 
 export type { HostingConfig };
 
@@ -28,6 +29,8 @@ export interface Config extends ApiConfig {
   /** Read `X-Forwarded-*` from the platform's proxy (on by default: every PaaS sets them). */
   trustProxy: boolean;
   log: boolean;
+  /** Absent unless the operator explicitly enables managed hosting. */
+  managedHosting?: ManagedConfig | null;
 }
 
 const blankToNull = (value: string | undefined): string | null => {
@@ -84,6 +87,10 @@ function loadOrCreateSecret(dataDir: string): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir = resolve(env.CLUB_DATA_DIR ?? './data');
   mkdirSync(dataDir, { recursive: true });
+  const corsOrigins = (env.CLUB_CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => stripSlash(origin.trim()))
+    .filter((origin) => origin !== '');
   return {
     port: intEnv(env.PORT, 8080),
     host: blankToNull(env.HOST) ?? '0.0.0.0',
@@ -92,10 +99,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     setupKey: blankToNull(env.CLUB_SETUP_KEY),
     secret: blankToNull(env.CLUB_SECRET) ?? loadOrCreateSecret(dataDir),
     publicOrigin: publicOriginFrom(env),
-    corsOrigins: (env.CLUB_CORS_ORIGINS ?? '')
-      .split(',')
-      .map((origin) => stripSlash(origin.trim()))
-      .filter((origin) => origin !== ''),
+    corsOrigins,
+    managedHosting: managedConfigFrom(env, corsOrigins),
     hosting: hostingFrom(env),
     openJoin: env.CLUB_OPEN_JOIN === '1',
     trustProxy: env.CLUB_TRUST_PROXY !== '0',

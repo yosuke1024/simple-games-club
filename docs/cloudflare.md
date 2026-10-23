@@ -1,5 +1,16 @@
 # The Cloudflare deployment — architecture and cost drivers
 
+> **2026-10-23 implementation amendment:** this document records the original
+> single-public-club spike and its dated measurements. Managed multi-club hosting
+> uses a separate configuration and registry object; see [managed.md](managed.md).
+> The current implementation returns `/api/v1/public` with `Cache-Control: no-store`
+> so a club made private is not served from the former five-minute cache. Therefore
+> cached-public-feed measurements below are historical, not a cost estimate for
+> the updated code. Admission policy adds database reads, and each managed request
+> passes through the registry before reaching its club object. Measure both paths
+> with the deployed version before enabling managed hosting or relying on the
+> former free-plan traffic estimate.
+
 Spike for the plan's PR B (simple-games `docs/plans/2026-09-30-public-club-house.md`,
 issue simple-games-club#1). The question it answers is the one that decides whether a
 Public Club House exists at all: **can one deployment of this server run on Cloudflare's

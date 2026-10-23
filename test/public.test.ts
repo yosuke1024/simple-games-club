@@ -109,7 +109,7 @@ describe('GET /api/v1/public (club.md §18)', () => {
 
     const reply = await server.api(`/api/v1/public?date=${DAY}`);
     expect(reply.status).toBe(200);
-    expect(reply.headers.get('cache-control')).toBe('public, max-age=300');
+    expect(reply.headers.get('cache-control')).toBe('no-store');
     expect(reply.headers.get('x-club-api')).toBe('1');
     expect(reply.json).toEqual({
       club: { name: "Yoh's Club" },
@@ -177,7 +177,7 @@ describe('GET /api/v1/public (club.md §18)', () => {
     }
   });
 
-  it('answers a second request from the cache on the Workers deployment only', async () => {
+  it('answers the same URL with current records on both deployments', async () => {
     server = await startServer({ openJoin: true });
     const yoh = await claimOwner(server, 'Yoh');
     await createDaily(yoh, 'sudoku', 's1', { elapsedSeconds: 300 });
@@ -187,12 +187,11 @@ describe('GET /api/v1/public (club.md §18)', () => {
     const list = await server.api('/api/v1/challenges', { token: yoh.token });
     await answer(ken, list.json[0].id, 's1', { elapsedSeconds: 200 });
     const second = await server.api(`/api/v1/public?date=${DAY}`);
-    // Workers: caches.default holds the first body for five minutes. Node sets the header only.
-    const cached = process.env.CLUB_IMPL === 'workers';
-    expect(second.json.today[0].resultCount).toBe(cached ? 1 : 2);
+    expect(second.json.today[0].resultCount).toBe(2);
+    expect(second.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('keys the cache by the resolved date: a request without one after midnight is not the first', async () => {
+  it('uses the current date on each request, including immediately after midnight', async () => {
     server = await startServer({ openJoin: true });
     const yoh = await claimOwner(server, 'Yoh');
     await createDaily(yoh, 'sudoku', 's1', { elapsedSeconds: 300 }, '2026-09-09');
@@ -205,15 +204,40 @@ describe('GET /api/v1/public (club.md §18)', () => {
     expect(second.json.today.map((t: { gameId: string }) => t.gameId)).toEqual(['hearts']);
   });
 
-  it('does not serve another object its cached body (Workers)', async () => {
+  it('does not serve another object the first club body (Workers)', async () => {
     server = await startServer({ openJoin: true, objectName: 'club-a' });
     await claimOwner(server, 'Yoh');
     const first = await server.api(`/api/v1/public?date=${DAY}`);
     expect(first.status).toBe(200);
     await server.reopen({ objectName: 'club-b' });
-    // A new, unclaimed object answers for itself (404), not with club-a's cached 200.
+    // A new, unclaimed object answers for itself (404), not with club-a's 200.
     const other = await server.api(`/api/v1/public?date=${DAY}`);
     expect(other.status).toBe(process.env.CLUB_IMPL === 'workers' ? 404 : 200);
+  });
+
+  it('hides a club immediately when it becomes private, and reads fresh data when made public again', async () => {
+    server = await startServer({ openJoin: true });
+    const owner = await claimOwner(server, 'Yoh');
+    await offer(owner, 'sudoku', { elapsedSeconds: 300 });
+    const path = `/api/v1/public?date=${DAY}`;
+    expect((await server.api(path)).json.rankings[0].leader.facts.elapsedSeconds).toBe(300);
+    await server.api('/api/v1/settings', {
+      method: 'PATCH',
+      token: owner.token,
+      body: { visibility: 'private' },
+    });
+    const hidden = await server.api(path);
+    expect(hidden.status).toBe(404);
+    expect(hidden.headers.get('cache-control')).toBe('no-store');
+    await offer(owner, 'sudoku', { elapsedSeconds: 200 });
+    await server.api('/api/v1/settings', {
+      method: 'PATCH',
+      token: owner.token,
+      body: { visibility: 'public' },
+    });
+    const visible = await server.api(path);
+    expect(visible.status).toBe(200);
+    expect(visible.json.rankings[0].leader.facts.elapsedSeconds).toBe(200);
   });
 });
 
@@ -343,12 +367,8 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     await offer(yoh, 'sudoku', { elapsedSeconds: 100 });
     await offer(yoh, 'hearts', { score: 5 });
     await offer(ken, 'hearts', { score: 6 });
-    // A fresh date each time: the Workers deployment caches a date's body for five minutes.
-    let day = 0;
     const order = async () => {
-      const reply = await server.api(
-        `/api/v1/public?date=2026-03-${String(++day).padStart(2, '0')}`,
-      );
+      const reply = await server.api(`/api/v1/public?date=${DAY}`);
       return (reply.json.rankings as PublicTable[]).map((t) => `${t.gameId}:${t.entryCount}`);
     };
     expect(await order()).toEqual(['hearts:2', 'sudoku:1']);

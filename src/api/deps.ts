@@ -27,6 +27,10 @@ export interface ApiConfig {
    * deployment, where anyone may join. Off, an invite token is required.
    */
   openJoin: boolean;
+  /** Managed tenants never expose the legacy public record feed or setup-key claim. */
+  managed?: boolean;
+  /** The subscription holder's member cannot be removed by a delegated club owner. */
+  managedOwnerMemberId?: string;
 }
 
 /** What every handler is handed. The request's clock travels on `Ctx.now`. */
@@ -39,5 +43,10 @@ export interface Deps {
 export const iso = (date: Date): string => date.toISOString();
 
 /** `https://<endpoint>/join#invite=<token>` — club.md §7-1. The token rides in the fragment. */
-export const inviteUrl = (origin: string, token: string): string =>
-  `${origin}/join#invite=${token}`;
+export const inviteUrl = (origin: string, token: string): string => {
+  const url = new URL(origin);
+  const managed = /^\/clubs\/(c_[A-Za-z0-9_-]+)$/.exec(url.pathname);
+  return managed === null
+    ? `${origin}/join#invite=${token}`
+    : `${url.origin}/join#club=${managed[1]}&invite=${token}`;
+};

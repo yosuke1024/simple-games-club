@@ -10,6 +10,8 @@ import type { Limits } from '../src/limits.js';
 
 export const SETUP_KEY = 'test-setup-key-0123456789abcdef';
 export const START = new Date('2026-09-09T09:00:00.000Z');
+export const MANAGED_ADMIN_KEY = 'test-managed-operator-key-0123456789abcdef';
+export const MANAGED_SECRET = 'test-managed-directory-secret-0123456789abcdef';
 
 export interface RequestInit_ {
   method?: string;
@@ -53,6 +55,7 @@ export interface ServerOptions {
   openJoin: boolean;
   /** Workers only: the Durable Object's name (`CLUB_OBJECT_NAME`); Node ignores it. */
   objectName: string | null;
+  managed: boolean;
 }
 
 export const DEFAULTS: ServerOptions = {
@@ -64,6 +67,7 @@ export const DEFAULTS: ServerOptions = {
   hosting: { provider: null, manageUrl: null },
   openJoin: false,
   objectName: null,
+  managed: false,
 };
 
 export const newClock = (): Clock => ({

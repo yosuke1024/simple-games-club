@@ -12,24 +12,31 @@ import { unstable_getMiniflareWorkerOptions } from 'wrangler';
 export const ROOT = join(import.meta.dirname, '..', '..');
 export const OUT_DIR = join(ROOT, 'dist-worker');
 export const OPTIONS_FILE = join(OUT_DIR, 'miniflare-options.json');
+export const MANAGED_OUT_DIR = join(ROOT, 'dist-worker-managed');
+export const MANAGED_OPTIONS_FILE = join(MANAGED_OUT_DIR, 'miniflare-options.json');
 
 export default function setup(): void {
-  execFileSync(
-    join(ROOT, 'node_modules', '.bin', 'wrangler'),
-    ['deploy', '--dry-run', '--outdir', OUT_DIR],
-    {
-      cwd: ROOT,
-      stdio: 'inherit',
-      env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
-    },
-  );
-  const { workerOptions } = unstable_getMiniflareWorkerOptions(join(ROOT, 'wrangler.toml'));
-  // Only what the tests must not restate: the runtime the Worker declares and
-  // the object class with its storage backend. Bindings are the tests' own,
-  // and assets are the Node static test's concern.
-  const { name, compatibilityDate, compatibilityFlags, durableObjects } = workerOptions;
-  writeFileSync(
-    OPTIONS_FILE,
-    JSON.stringify({ name, compatibilityDate, compatibilityFlags, durableObjects }, null, 2),
-  );
+  for (const [config, output, optionsFile] of [
+    ['wrangler.toml', OUT_DIR, OPTIONS_FILE],
+    ['wrangler.managed.toml', MANAGED_OUT_DIR, MANAGED_OPTIONS_FILE],
+  ] as const) {
+    execFileSync(
+      join(ROOT, 'node_modules', '.bin', 'wrangler'),
+      ['deploy', '--dry-run', '--config', config, '--outdir', output],
+      {
+        cwd: ROOT,
+        stdio: 'inherit',
+        env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
+      },
+    );
+    const { workerOptions } = unstable_getMiniflareWorkerOptions(join(ROOT, config));
+    // Only what the tests must not restate: the runtime the Worker declares and
+    // the object class with its storage backend. Bindings are the tests' own,
+    // and assets are the Node static test's concern.
+    const { name, compatibilityDate, compatibilityFlags, durableObjects } = workerOptions;
+    writeFileSync(
+      optionsFile,
+      JSON.stringify({ name, compatibilityDate, compatibilityFlags, durableObjects }, null, 2),
+    );
+  }
 }

@@ -1,6 +1,7 @@
 import { API_VERSION } from '../limits.js';
 import type { Router } from '../http/router.js';
 import type { Deps } from './deps.js';
+import { settingsOf } from './settings.js';
 
 /**
  * `GET /health` — no auth, no rate limit: the template's healthcheck and the
@@ -15,7 +16,7 @@ export function registerHealth(router: Router, deps: Deps): void {
       ok: true,
       api: API_VERSION,
       claimed: deps.store.getClub() !== null,
-      open: deps.config.openJoin,
+      open: settingsOf(deps).visibility === 'public',
     },
   }));
 }

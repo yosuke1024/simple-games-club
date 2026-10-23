@@ -9,6 +9,9 @@ repository, which owns the product decisions:
    and the cost ceiling a hosted deployment must stay under.
 3. `docs/architecture/club.md` — **the contract this server implements**. §5 is the
    API, §7 the invite URL, §8 the setup key / hosting model, §14 the decided points.
+4. `docs/architecture/managed-clubs.md` — the 2026-10-23 amendment for managed
+   hosting, admission policy, owner records and albums. `docs/managed.md` here is
+   its operator runbook, not a second product specification.
 
 Rules that follow from those documents and are not negotiable here:
 
@@ -16,9 +19,12 @@ Rules that follow from those documents and are not negotiable here:
   limit is a change to `club.md` first; the tests under `test/` mirror its JSON.
 - The server interprets `params` and `facts` in exactly one place
   (`src/contracts/games.ts`, for club records) and nowhere else.
-- No accounts, no passwords, no e-mail, no OAuth. Tokens only, hashed at rest,
-  except the member invite token the owner must read back.
-- No polling, no push, no websockets, no background jobs, no analytics.
+- Ordinary members need no accounts, passwords, e-mail or OAuth. Managed owners
+  additionally have an operator-provisioned hosting entitlement and an access key.
+  Tokens are hashed at rest, except the member invite token the owner must read back.
+- No polling, push, websockets, background jobs or gameplay telemetry. Owner
+  summaries derive only from the bounded records members already chose to share;
+  they must not imply a complete play history.
 - Two deployments, one contract. The API lives in `src/api/` and `src/http/api.ts`
   and is carried by `src/app.ts` (Node, `node:sqlite`) and `src/worker/` (Cloudflare
   Workers, a Durable Object's SQLite). A behaviour change goes in the shared code; an
