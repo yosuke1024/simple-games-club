@@ -20,7 +20,9 @@ Rules that follow from those documents and are not negotiable here:
 - The server interprets `params` and `facts` in exactly one place
   (`src/contracts/games.ts`, for club records) and nowhere else.
 - Ordinary members need no accounts, passwords, e-mail or OAuth. Managed owners
-  additionally have an operator-provisioned hosting entitlement and an access key.
+  have a self-service Trial or operator-provisioned Basic entitlement and an access key.
+  The 50-member owner ad-removal benefit counts current memberships while hosting is active;
+  it is not a permanent purchase or a count of unique people across clubs.
   Tokens are hashed at rest, except the member invite token the owner must read back.
 - No polling, push, websockets, background jobs or gameplay telemetry. Owner
   summaries derive only from the bounded records members already chose to share;

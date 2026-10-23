@@ -1,11 +1,12 @@
 import type { Row, SqlDriver } from '../db/driver.js';
 import type { ClubSettings } from '../db/policy.js';
+import type { ManagedPlanId } from './plans.js';
 
 export interface ManagedOwner {
   id: string;
   reference: string;
-  plan: 'basic';
-  validUntil: string;
+  plan: ManagedPlanId;
+  validUntil: string | null;
   tokenHash: string;
   createdAt: string;
   credentialVersion: number;
@@ -27,8 +28,8 @@ export const MANAGED_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS managed_owners (
   id TEXT PRIMARY KEY,
   reference TEXT NOT NULL UNIQUE,
-  plan TEXT NOT NULL CHECK (plan = 'basic'),
-  valid_until TEXT NOT NULL,
+  plan TEXT NOT NULL CHECK (plan IN ('trial', 'basic')),
+  valid_until TEXT CHECK (plan = 'trial' OR valid_until IS NOT NULL),
   token_hash TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL,
   credential_version INTEGER NOT NULL DEFAULT 1
@@ -56,8 +57,8 @@ CREATE INDEX IF NOT EXISTS managed_clubs_directory ON managed_clubs(listed, seq)
 const ownerOf = (row: Row): ManagedOwner => ({
   id: String(row.id),
   reference: String(row.reference),
-  plan: 'basic',
-  validUntil: String(row.valid_until),
+  plan: row.plan === 'trial' ? 'trial' : 'basic',
+  validUntil: row.valid_until === null ? null : String(row.valid_until),
   tokenHash: String(row.token_hash),
   createdAt: String(row.created_at),
   credentialVersion: Number(row.credential_version),
@@ -80,16 +81,46 @@ const clubOf = (row: Row): ManagedClub => ({
 
 export class ManagedStore {
   constructor(private readonly db: SqlDriver) {
-    db.exec(MANAGED_SCHEMA_SQL);
     // Also safe for a development database made before credential rotation was added.
+    const oldColumns = db.all('PRAGMA table_info(managed_owners)');
     if (
-      !db
-        .all('PRAGMA table_info(managed_owners)')
-        .some((column) => column.name === 'credential_version')
+      oldColumns.length > 0 &&
+      !oldColumns.some((column) => column.name === 'credential_version')
     ) {
       db.exec(
         'ALTER TABLE managed_owners ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 1',
       );
+    }
+    // The initial preview constrained every owner to Basic with a non-null expiry.
+    // Rename the child first so SQLite keeps its old foreign key pointing at the
+    // old parent. Copy both tables before dropping either; each step can resume
+    // after interruption without changing IDs, credentials, records or sequences.
+    if (oldColumns.some((column) => column.name === 'valid_until' && column.notnull === 1)) {
+      if (
+        db.all('PRAGMA table_info(managed_clubs_v1)').length === 0 &&
+        db.all('PRAGMA table_info(managed_clubs)').length > 0
+      ) {
+        db.exec('ALTER TABLE managed_clubs RENAME TO managed_clubs_v1');
+      }
+      db.exec('ALTER TABLE managed_owners RENAME TO managed_owners_v1');
+    }
+    db.exec(MANAGED_SCHEMA_SQL);
+    if (db.all('PRAGMA table_info(managed_owners_v1)').length > 0) {
+      db.exec(`INSERT OR IGNORE INTO managed_owners
+        (id, reference, plan, valid_until, token_hash, created_at, credential_version)
+        SELECT id, reference, plan, valid_until, token_hash, created_at, credential_version
+        FROM managed_owners_v1`);
+      if (db.all('PRAGMA table_info(managed_clubs_v1)').length > 0) {
+        db.exec(`INSERT OR IGNORE INTO managed_clubs
+          (seq, id, owner_id, client_id, name, nickname, created_at, member_count, status,
+            visibility, approval_required, allowed_game_ids, listed)
+          SELECT seq, id, owner_id, client_id, name, nickname, created_at, member_count, status,
+            visibility, approval_required, allowed_game_ids, listed FROM managed_clubs_v1`);
+        db.exec('DROP TABLE managed_clubs_v1');
+      }
+      db.exec('DROP TABLE managed_owners_v1');
+      // Renamed tables retained the old index names until the drops above.
+      db.exec(MANAGED_SCHEMA_SQL);
     }
   }
 
@@ -122,8 +153,17 @@ export class ManagedStore {
     );
   }
 
-  renewOwner(id: string, validUntil: string): void {
-    this.db.run('UPDATE managed_owners SET valid_until = ? WHERE id = ?', validUntil, id);
+  renewOwner(id: string, validUntil: string | null, plan?: ManagedPlanId): void {
+    if (plan === undefined) {
+      this.db.run('UPDATE managed_owners SET valid_until = ? WHERE id = ?', validUntil, id);
+    } else {
+      this.db.run(
+        'UPDATE managed_owners SET plan = ?, valid_until = ? WHERE id = ?',
+        plan,
+        validUntil,
+        id,
+      );
+    }
   }
 
   rotateOwnerToken(id: string, hash: string): ManagedOwner {
@@ -203,7 +243,8 @@ export class ManagedStore {
     const rows = this.db.all(
       `SELECT c.* FROM managed_clubs c
       JOIN managed_owners o ON o.id = c.owner_id
-      WHERE c.listed = 1 AND c.status = 'ready' AND c.seq > ? AND o.valid_until > ?
+      WHERE c.listed = 1 AND c.status = 'ready' AND c.seq > ?
+        AND (o.valid_until IS NULL OR o.valid_until > ?)
       ORDER BY c.seq LIMIT 51`,
       cursor,
       now,

@@ -51,9 +51,10 @@ afterEach(async () => {
 });
 
 describe('managed hosting', () => {
-  it('defines the agreed capacities but makes only Basic available, with no invented prices', async () => {
+  it('defines Trial and Basic capacities while future plans stay unavailable, with no invented prices', async () => {
     const plans = await server.api(`${ROOT}/plans`);
     expect(plans.json.plans).toEqual([
+      { id: 'trial', maxMembersPerClub: 5, maxClubs: 1, available: true },
       { id: 'basic', maxMembersPerClub: 50, maxClubs: 3, available: true },
       { id: 'plus', maxMembersPerClub: 100, maxClubs: 5, available: false },
       { id: 'max', maxMembersPerClub: null, maxClubs: 100, available: false },

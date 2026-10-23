@@ -22,7 +22,14 @@ import {
 import { RateLimiter } from '../http/rateLimit.js';
 import { DEFAULT_LIMITS } from '../limits.js';
 import * as v from '../validate.js';
-import { BASIC_PLAN, MANAGED_CLUB_PATH, MANAGED_PLANS, MANAGED_PREFIX } from './plans.js';
+import {
+  AD_REMOVAL_MEMBERS,
+  MANAGED_CLUB_PATH,
+  MANAGED_PLANS,
+  MANAGED_PREFIX,
+  planOf,
+  type ManagedPlanId,
+} from './plans.js';
 import { ManagedStore, type ManagedClub, type ManagedOwner } from './store.js';
 import { managedMemberToken, type ManagedTransport } from './tenant.js';
 
@@ -56,7 +63,8 @@ export const managedConfigFrom = (
   return { secret, adminKey, corsOrigins };
 };
 
-const active = (owner: ManagedOwner, now: Date): boolean => owner.validUntil > now.toISOString();
+const active = (owner: ManagedOwner, now: Date): boolean =>
+  owner.validUntil === null || owner.validUntil > now.toISOString();
 const ownerShape = (owner: ManagedOwner, now: Date) => ({
   id: owner.id,
   plan: owner.plan,
@@ -76,13 +84,15 @@ const clubShape = (club: ManagedClub, origin: string) => ({
   status: club.status,
 });
 
-const futurePlan = (): ApiError => new ApiError(409, 'plan_unavailable', 'only Basic is available');
+const futurePlan = (): ApiError =>
+  new ApiError(409, 'plan_unavailable', 'only Trial and Basic are available');
 const requireActive = (owner: ManagedOwner, now: Date): void => {
   if (!active(owner, now))
     throw new ApiError(403, 'subscription_inactive', 'the hosting entitlement has expired');
 };
 
-function validUntil(value: unknown): string {
+function validUntil(plan: ManagedPlanId, value: unknown): string | null {
+  if (value === null && plan === 'trial') return null;
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(value)) {
     throw invalidRequest('validUntil must be an ISO date and time');
   }
@@ -124,11 +134,13 @@ export function createManagedApi(options: {
   const { store, config, transport } = options;
   const ownerLimiter = new RateLimiter(60, 60_000);
   const publicLimiter = new RateLimiter(60, 60_000);
+  const trialLimiter = new RateLimiter(10, 60_000);
   const clubMutations = new Map<string, Promise<void>>();
 
   // The directory and a tenant are different databases. Keep each metadata mutation and
   // its acknowledgement together, so a delayed public snapshot cannot republish a club
-  // after another request made it private. Reads and result submissions never take this lock.
+  // after another request made it private. Ordinary tenant reads and result submissions
+  // never take this lock; the explicit owner-benefit refresh shares it with mutations.
   const withClubMutation = async <T>(clubId: string, action: () => Promise<T>): Promise<T> => {
     const previous = clubMutations.get(clubId) ?? Promise.resolve();
     let release!: () => void;
@@ -180,6 +192,38 @@ export function createManagedApi(options: {
           throw unauthorized('the owner access key has been replaced');
         return owner;
       };
+      const ownerSpace = async (id: string) => {
+        // Directory acknowledgements can be lost after the tenant committed a join or
+        // removal. Refresh the bounded set of ready clubs before deciding the benefit,
+        // using the same lock as metadata mutations so stale snapshots cannot win.
+        for (const club of store.clubs(id)) {
+          if (club.status !== 'ready') continue;
+          await withClubMutation(club.id, async () => {
+            store.syncClub(club.id, await transport.describe(club.id));
+          });
+          ownerAfterAwait(id);
+        }
+        const owner = ownerAfterAwait(id);
+        const clubs = store.clubs(id);
+        const memberCount = clubs.reduce(
+          (sum, club) => sum + (club.status === 'ready' ? club.memberCount : 0),
+          0,
+        );
+        const plan = planOf(owner.plan);
+        return {
+          owner: ownerShape(owner, request.now),
+          limits: { maxClubs: plan.maxClubs, maxMembersPerClub: plan.maxMembersPerClub },
+          clubs: clubs.map((club) => clubShape(club, origin)),
+          benefits: {
+            adRemoval: {
+              requiredMembers: AD_REMOVAL_MEMBERS,
+              memberCount,
+              active: active(owner, request.now) && memberCount >= AD_REMOVAL_MEMBERS,
+              validUntil: owner.validUntil,
+            },
+          },
+        };
+      };
       const adminAuth = (): void => {
         const token = bearerToken(request.header('authorization'));
         if (
@@ -218,6 +262,7 @@ export function createManagedApi(options: {
               holder.credentialVersion,
             ),
             version: holder.credentialVersion,
+            maxMembers: planOf(holder.plan).maxMembersPerClub,
           };
           const forward = async (): Promise<ApiResponse> => {
             let hidden = false;
@@ -272,6 +317,37 @@ export function createManagedApi(options: {
             nextCursor: page.nextCursor,
           });
         }
+        if (method === 'POST' && path === `${MANAGED_PREFIX}/trial`) {
+          const token = bearerToken(request.header('authorization'));
+          if (token === null || !/^[a-f0-9]{64}$/.test(token)) {
+            throw unauthorized('a newly generated 32-byte hexadecimal owner key is required');
+          }
+          const input = await body();
+          if (Object.keys(input).length > 0) throw invalidRequest('the trial body must be empty');
+          const tokenHash = hashToken(config.secret, token);
+          const existing = store.ownerByToken(tokenHash);
+          if (existing !== null) {
+            if (!ownerLimiter.allow(existing.id, request.now.getTime())) throw rateLimited();
+            return json(200, await ownerSpace(existing.id));
+          }
+          // Keep an opaque bootstrap reference after rotation. Replaying a revoked key
+          // must not recreate a new entitlement or appear to recover the lost clubs.
+          const reference = `trial_${tokenHash}`;
+          if (store.ownerByReference(reference) !== null)
+            throw unauthorized('the owner access key has been replaced');
+          if (!trialLimiter.allow(request.clientIp, request.now.getTime())) throw rateLimited();
+          const owner: ManagedOwner = {
+            id: newId('o'),
+            reference,
+            plan: 'trial',
+            validUntil: null,
+            tokenHash,
+            createdAt: request.now.toISOString(),
+            credentialVersion: 1,
+          };
+          store.addOwner(owner);
+          return json(201, await ownerSpace(owner.id));
+        }
         if (method === 'GET' && path === `${MANAGED_PREFIX}/admin/owners`) {
           adminAuth();
           const reference = request.url.searchParams.get('reference');
@@ -285,14 +361,14 @@ export function createManagedApi(options: {
         if (method === 'POST' && path === `${MANAGED_PREFIX}/admin/owners`) {
           adminAuth();
           const input = await body();
-          if (input.plan !== 'basic') throw futurePlan();
+          if (input.plan !== 'basic' && input.plan !== 'trial') throw futurePlan();
           if (
             typeof input.reference !== 'string' ||
             !/^[A-Za-z0-9_-]{1,128}$/.test(input.reference)
           ) {
             throw invalidRequest('reference must be an opaque billing reference');
           }
-          const until = validUntil(input.validUntil);
+          const until = validUntil(input.plan, input.validUntil);
           if (store.ownerByReference(input.reference) !== null) {
             throw new ApiError(409, 'owner_exists', 'this reference already has an owner');
           }
@@ -300,7 +376,7 @@ export function createManagedApi(options: {
           const owner: ManagedOwner = {
             id: newId('o'),
             reference: input.reference,
-            plan: 'basic',
+            plan: input.plan,
             validUntil: until,
             tokenHash: hashToken(config.secret, ownerToken),
             createdAt: request.now.toISOString(),
@@ -314,14 +390,21 @@ export function createManagedApi(options: {
         ).exec(path);
         if (adminOwner !== null) {
           adminAuth();
-          const owner = store.owner(adminOwner[1]!);
+          let owner = store.owner(adminOwner[1]!);
           if (owner === null) throw notFound('no such owner');
           if (method === 'PATCH' && adminOwner[2] === undefined) {
             const input = await body();
-            if (input.plan !== undefined && input.plan !== 'basic') throw futurePlan();
-            const until = validUntil(input.validUntil);
-            store.renewOwner(owner.id, until);
-            return json(200, { owner: ownerShape({ ...owner, validUntil: until }, request.now) });
+            owner = store.owner(owner.id)!;
+            const plan = input.plan ?? owner.plan;
+            if (plan !== 'basic' && plan !== 'trial') throw futurePlan();
+            if (owner.plan === 'basic' && plan === 'trial') {
+              throw new ApiError(409, 'plan_unavailable', 'downgrading to Trial is not supported');
+            }
+            const until = validUntil(plan, input.validUntil);
+            store.renewOwner(owner.id, until, plan);
+            return json(200, {
+              owner: ownerShape({ ...owner, plan, validUntil: until }, request.now),
+            });
           }
           if (method === 'POST' && adminOwner[2] !== undefined) {
             const ownerToken = randomToken(MEMBER_TOKEN_BYTES);
@@ -338,6 +421,7 @@ export function createManagedApi(options: {
                     rotated.credentialVersion,
                   ),
                   version: rotated.credentialVersion,
+                  maxMembers: planOf(rotated.plan).maxMembersPerClub,
                 }),
               );
             }
@@ -353,14 +437,7 @@ export function createManagedApi(options: {
         }
         if (method === 'GET' && path === `${MANAGED_PREFIX}/owner`) {
           const owner = ownerAuth();
-          return json(200, {
-            owner: ownerShape(owner, request.now),
-            limits: {
-              maxClubs: BASIC_PLAN.maxClubs,
-              maxMembersPerClub: BASIC_PLAN.maxMembersPerClub,
-            },
-            clubs: store.clubs(owner.id).map((club) => clubShape(club, origin)),
-          });
+          return json(200, await ownerSpace(owner.id));
         }
         if (method === 'POST' && path === `${MANAGED_PREFIX}/clubs`) {
           let owner = ownerAuth();
@@ -376,8 +453,8 @@ export function createManagedApi(options: {
           let club = store.clubByClientId(owner.id, input.clientId);
           const existing = club !== null;
           if (club === null) {
-            if (store.clubs(owner.id).length >= BASIC_PLAN.maxClubs) {
-              throw new ApiError(409, 'too_many_clubs', 'Basic includes at most three clubs');
+            if (store.clubs(owner.id).length >= planOf(owner.plan).maxClubs) {
+              throw new ApiError(409, 'too_many_clubs', 'the plan club limit has been reached');
             }
             club = {
               id: newId('c'),
@@ -408,6 +485,7 @@ export function createManagedApi(options: {
               club: reserved,
               memberToken,
               credentialVersion: owner.credentialVersion,
+              maxMembers: planOf(owner.plan).maxMembersPerClub,
             });
             owner = ownerAfterAwait(owner.id);
             requireActive(owner, request.now);
@@ -440,6 +518,7 @@ export function createManagedApi(options: {
                 owner.credentialVersion,
               ),
               version: owner.credentialVersion,
+              maxMembers: planOf(owner.plan).maxMembersPerClub,
             };
             // The owner can recover a reserved slot even if the original creation's reply
             // was lost together with the local idempotency key.
@@ -450,6 +529,7 @@ export function createManagedApi(options: {
                     club: current,
                     memberToken: credential.memberToken,
                     credentialVersion: credential.version,
+                    maxMembers: credential.maxMembers,
                   });
             owner = ownerAfterAwait(owner.id);
             if (current.status !== 'ready') {

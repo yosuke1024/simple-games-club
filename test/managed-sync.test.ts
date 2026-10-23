@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { hashToken } from '../src/auth/tokens.js';
 import { openDatabase, type NodeDatabase } from '../src/db/database.js';
 import type { ApiRequest, ApiResponse } from '../src/http/api.js';
 import { readJsonObject } from '../src/http/body.js';
@@ -9,11 +10,13 @@ import type { ManagedMetadata, ManagedTransport } from '../src/managed/tenant.js
 const databases: NodeDatabase[] = [];
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
+  vi.restoreAllMocks();
 });
 
 const CLUB_ID = 'c_123456789012';
 const OWNER_ID = 'o_123456789012';
 const NOW = new Date('2026-10-23T12:00:00.000Z');
+const SECRET = 'test-managed-secret-0123456789abcdef';
 
 function deferred() {
   let resolve!: () => void;
@@ -55,7 +58,7 @@ function harness(onDescribe?: (snapshot: ManagedMetadata) => Promise<ManagedMeta
     id: OWNER_ID,
     reference: 'fixture',
     plan: 'basic',
-    tokenHash: 'unused',
+    tokenHash: hashToken(SECRET, 'owner-token'),
     createdAt: NOW.toISOString(),
     validUntil: '2026-11-23T12:00:00.000Z',
     credentialVersion: 1,
@@ -124,7 +127,7 @@ function harness(onDescribe?: (snapshot: ManagedMetadata) => Promise<ManagedMeta
   const api = createManagedApi({
     store,
     config: {
-      secret: 'test-managed-secret-0123456789abcdef',
+      secret: SECRET,
       adminKey: 'test-managed-admin-0123456789abcdef',
       corsOrigins: [],
     },
@@ -136,6 +139,7 @@ function harness(onDescribe?: (snapshot: ManagedMetadata) => Promise<ManagedMeta
     edit: (visibility: unknown, token?: string) =>
       api.handle(apiRequest('PATCH', `/clubs/${CLUB_ID}/api/v1/settings`, { visibility }, token)),
     read: () => api.handle(apiRequest('GET', `/clubs/${CLUB_ID}/api/v1/club`)),
+    owner: () => api.handle(apiRequest('GET', '/api/v1/managed/owner')),
     listed: () => store.directory(null, NOW.toISOString()).clubs,
   };
 }
@@ -143,6 +147,75 @@ function harness(onDescribe?: (snapshot: ManagedMetadata) => Promise<ManagedMeta
 // This intentionally controls transport timing; the real Node/workerd contract suite
 // separately verifies HTTP, authentication and storage on both implementations.
 describe.skipIf(process.env.CLUB_IMPL === 'workers')('managed metadata synchronization', () => {
+  it('refreshes benefits from current tenant counts after a lost metadata acknowledgement', async () => {
+    const h = harness();
+    // The tenant committed memberships but the directory never received that response.
+    h.model.metadata.memberCount = 50;
+    expect(h.store.club(CLUB_ID)?.memberCount).toBe(1);
+    const earned = JSON.parse((await h.owner()).body!);
+    expect(earned.clubs[0].memberCount).toBe(50);
+    expect(earned.benefits.adRemoval).toMatchObject({ memberCount: 50, active: true });
+    // A removal can lose its acknowledgement too. The next owner view must revoke it.
+    h.model.metadata.memberCount = 49;
+    const removed = JSON.parse((await h.owner()).body!);
+    expect(removed.clubs[0].memberCount).toBe(49);
+    expect(removed.benefits.adRemoval).toMatchObject({ memberCount: 49, active: false });
+  });
+
+  it('fails a fresh benefit read when the authoritative membership count is unavailable', async () => {
+    let unavailable = false;
+    const h = harness(async (snapshot) => {
+      if (unavailable) throw new Error('tenant unavailable');
+      return snapshot;
+    });
+    h.model.metadata.memberCount = 50;
+    expect((await h.owner()).status).toBe(200);
+    unavailable = true;
+    h.model.metadata.memberCount = 49;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = await h.owner();
+    expect(failure.status).toBe(500);
+    expect(JSON.parse(failure.body!)).not.toHaveProperty('benefits');
+  });
+
+  it('does not count a reserved club whose holder has not been provisioned', async () => {
+    const h = harness();
+    h.model.metadata.memberCount = 49;
+    h.store.reserveClub({
+      ...h.store.club(CLUB_ID)!,
+      id: 'c_000000000002',
+      clientId: 'not-provisioned',
+      status: 'provisioning',
+      memberCount: 1,
+    });
+    const space = JSON.parse((await h.owner()).body!);
+    expect(space.clubs).toHaveLength(2);
+    expect(space.benefits.adRemoval).toMatchObject({ memberCount: 49, active: false });
+  });
+
+  it('holds the metadata lock while refreshing an owner view without blocking member reads', async () => {
+    const described = deferred();
+    const release = deferred();
+    let reads = 0;
+    const h = harness(async (snapshot) => {
+      if (++reads === 1) {
+        described.resolve();
+        await release.promise;
+      }
+      return snapshot;
+    });
+    const refresh = h.owner();
+    await described.promise;
+    const change = h.edit('private');
+    expect((await h.read()).status).toBe(200);
+    expect(h.model.edits).toEqual([]);
+    release.resolve();
+    expect((await refresh).status).toBe(200);
+    expect((await change).status).toBe(200);
+    expect(h.listed()).toEqual([]);
+    expect(h.store.club(CLUB_ID)?.visibility).toBe('private');
+  });
+
   it('does not republish a newly private club when an earlier public acknowledgement is delayed', async () => {
     const firstDescribe = deferred();
     const release = deferred();

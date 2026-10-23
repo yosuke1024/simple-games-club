@@ -19,6 +19,7 @@ const ORIGIN_HEADER = 'X-Club-Origin';
 const TEST_NOW_HEADER = 'X-Club-Test-Now';
 const CREDENTIAL_HEADER = 'X-Club-Managed-Owner-Key';
 const CREDENTIAL_VERSION_HEADER = 'X-Club-Managed-Owner-Version';
+const MAX_MEMBERS_HEADER = 'X-Club-Managed-Max-Members';
 
 function apiRequest(request: Request, env: Env): ApiRequest {
   const url = new URL(request.url);
@@ -59,6 +60,7 @@ function fetchRequest(request: ApiRequest, credential: ManagedCredential): Reque
   headers.set(TEST_NOW_HEADER, request.now.toISOString());
   headers.set(CREDENTIAL_HEADER, credential.memberToken);
   headers.set(CREDENTIAL_VERSION_HEADER, String(credential.version));
+  headers.set(MAX_MEMBERS_HEADER, String(credential.maxMembers));
   const iterator = request.body.chunks()[Symbol.asyncIterator]();
   const body =
     request.method === 'GET' || request.method === 'HEAD'
@@ -153,6 +155,7 @@ export class ManagedClubObject extends DurableObject<Env> {
       await this.tenant.handle(apiRequest(request, this.env), {
         memberToken: request.headers.get(CREDENTIAL_HEADER) ?? '',
         version: Number(request.headers.get(CREDENTIAL_VERSION_HEADER) ?? 0),
+        maxMembers: Number(request.headers.get(MAX_MEMBERS_HEADER) ?? 0),
       }),
     );
   }

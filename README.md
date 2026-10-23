@@ -24,11 +24,13 @@ this server implements.
 shipped yet. This server exists so it can be built against something real.
 
 **Managed hosting implementation preview (2026-10-23):** an independent Cloudflare
-deployment can host multiple owner-created clubs. Basic allows three clubs of
+deployment can host multiple owner-created clubs. Free, self-service Trial allows
+one club of five members with no automatic expiration. Basic allows three clubs of
 50 active members each, including the owner; future Plus and MAX definitions are
 present but unavailable. The matching client and product contract live in
 simple-games `docs/architecture/managed-clubs.md`. See [the managed runbook](docs/managed.md)
-for configuration, operator-issued entitlements, access-key recovery and release
+for configuration, Trial bootstrap, operator-issued Basic upgrades, the conditional
+50-member owner ad-removal benefit, access-key recovery and release
 gates. Pricing and checkout are not implemented, and this does not deploy or alter
 the existing public service.
 

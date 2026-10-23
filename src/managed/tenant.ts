@@ -9,18 +9,20 @@ import { createApi, type Api, type ApiRequest, type ApiResponse } from '../http/
 import { forbidden, notFound, unauthorized } from '../http/errors.js';
 import type { ClubSettings } from '../db/policy.js';
 import type { ManagedClub } from './store.js';
-import { BASIC_PLAN } from './plans.js';
+import { BASIC_PLAN, TRIAL_PLAN } from './plans.js';
 
 export interface ManagedProvision {
   club: ManagedClub;
   memberToken: string;
   credentialVersion: number;
+  maxMembers: number;
 }
 
 /** Trusted registry-to-tenant metadata; never accepted from a public request. */
 export interface ManagedCredential {
   memberToken: string;
   version: number;
+  maxMembers: number;
 }
 
 export interface ManagedSession {
@@ -58,7 +60,9 @@ export const managedMemberToken = (
 export class ManagedTenant {
   private readonly store: Store;
   private readonly config: ApiConfig;
-  private readonly api: Api;
+  private api: Api;
+  private maxMembers: number;
+  private capacityStored: boolean;
 
   constructor(
     private readonly db: SqlDriver,
@@ -74,6 +78,16 @@ export class ManagedTenant {
       hosting: { provider: 'managed', manageUrl: null },
       managedOwnerMemberId: holder === undefined ? undefined : String(holder.value),
     };
+    const capacity = db.get("SELECT value FROM meta WHERE key = 'managed_max_members'");
+    this.capacityStored = capacity !== undefined;
+    // Tenants made before Trial existed were all Basic. New tenants start at Trial
+    // capacity and persist it before creating their club, including partial retries.
+    this.maxMembers =
+      capacity === undefined
+        ? this.store.getClub() === null
+          ? TRIAL_PLAN.maxMembersPerClub
+          : BASIC_PLAN.maxMembersPerClub
+        : Number(capacity.value);
     this.api = this.makeApi();
   }
 
@@ -81,14 +95,35 @@ export class ManagedTenant {
     return createApi({
       store: this.store,
       config: this.config,
-      limits: { maxMembers: BASIC_PLAN.maxMembersPerClub },
+      limits: { maxMembers: this.maxMembers },
     });
   }
 
+  private applyCapacity(maxMembers: number): void {
+    if (maxMembers !== TRIAL_PLAN.maxMembersPerClub && maxMembers !== BASIC_PLAN.maxMembersPerClub)
+      throw unauthorized('invalid managed member limit');
+    // Trial -> Basic is the only supported plan change. Capacity travels separately
+    // from key versions so upgrading retains member keys. Delayed Trial requests
+    // cannot lower an already upgraded tenant, even after a restart.
+    const next = Math.max(this.maxMembers, maxMembers);
+    if (!this.capacityStored || next !== this.maxMembers) {
+      this.db.run(
+        "INSERT INTO meta (key, value) VALUES ('managed_max_members', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        String(next),
+      );
+      this.capacityStored = true;
+    }
+    if (next !== this.maxMembers) {
+      this.maxMembers = next;
+      this.api = this.makeApi();
+    }
+  }
+
   initialize(input: ManagedProvision): ManagedSession {
-    const { club, memberToken, credentialVersion } = input;
+    const { club, memberToken, credentialVersion, maxMembers } = input;
     const current = this.store.getClub();
     if (current !== null && current.id !== club.id) throw forbidden('tenant does not match');
+    this.applyCapacity(maxMembers);
     if (current === null) this.store.createClub(club.id, club.name, club.createdAt);
     // Every step is idempotent, including retry after a response was lost half way through.
     if (this.store.memberInvite() === null) {
@@ -121,7 +156,7 @@ export class ManagedTenant {
         club.createdAt,
       );
     } else {
-      this.rekeyOwner({ memberToken, version: credentialVersion });
+      this.rekeyOwner({ memberToken, version: credentialVersion, maxMembers });
     }
     this.db.run(
       "INSERT INTO meta (key, value) VALUES ('managed_owner_credential_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -163,6 +198,7 @@ export class ManagedTenant {
     if (!Number.isSafeInteger(credential.version) || credential.version < 1) {
       throw unauthorized('invalid managed credential version');
     }
+    this.applyCapacity(credential.maxMembers);
     const version = Number(
       this.db.get("SELECT value FROM meta WHERE key = 'managed_owner_credential_version'")?.value ??
         0,
