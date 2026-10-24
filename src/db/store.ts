@@ -2,7 +2,9 @@
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
 import { contractOf, resultRank, type Direction } from '../contracts/games.js';
-import type { Row, SqlDriver } from './driver.js';
+import type { Row, SqlDriver, SqlValue } from './driver.js';
+import { PolicyStore } from './policy.js';
+import { OwnerRecordStore } from './ownerRecords.js';
 
 export type Role = 'owner' | 'member';
 export type Outcome = 'completed' | 'played';
@@ -223,8 +225,47 @@ const CHALLENGE_SELECT = `
   JOIN members m ON m.id = c.created_by
   WHERE c.deleted_at IS NULL`;
 
+/**
+ * Game ids bound per query. Durable Objects bind at most 100 parameters and an allowlist
+ * may name 128 games, so a filtered list asks in chunks; each chunk keeps its own top
+ * `limit`, and the chunks' rows are merged in the query's order (`filteredTop`).
+ */
+const GAME_ID_CHUNK = 90;
+
+/**
+ * The first `limit` rows, in `order`, whose game is in `gameIds` (every row when null):
+ * no row past a cutoff is lost, since each chunk's query applies the limit itself.
+ */
+function filteredTop(
+  gameIds: readonly string[] | null,
+  limit: number,
+  query: (gameIds: readonly string[] | null) => Row[],
+  order: (a: Row, b: Row) => number,
+): Row[] {
+  if (gameIds === null) return query(null);
+  if (gameIds.length === 0) return [];
+  if (gameIds.length <= GAME_ID_CHUNK) return query(gameIds);
+  const rows: Row[] = [];
+  for (let i = 0; i < gameIds.length; i += GAME_ID_CHUNK) {
+    rows.push(...query(gameIds.slice(i, i + GAME_ID_CHUNK)));
+  }
+  return rows.sort(order).slice(0, limit);
+}
+
+/** SQLite's own text order (BINARY), not the locale's. */
+const binary = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+const inList = (gameIds: readonly string[] | null, prefix: string): string =>
+  gameIds === null ? '' : `${prefix} game_id IN (${gameIds.map(() => '?').join(', ')})`;
+
 export class Store {
-  constructor(private readonly db: SqlDriver) {}
+  readonly policy: PolicyStore;
+  readonly ownerRecords: OwnerRecordStore;
+
+  constructor(private readonly db: SqlDriver) {
+    this.policy = new PolicyStore(db);
+    this.ownerRecords = new OwnerRecordStore(db);
+  }
 
   // ---------- club ----------
 
@@ -673,9 +714,15 @@ export class Store {
     afterId: string | null,
     limit: number,
     daily: string | null = null,
+    allowedGameIds: readonly string[] | null = null,
   ): ChallengeRow[] {
+    if (allowedGameIds?.length === 0) return [];
     const bindings: (string | number)[] = [viewerId];
     let where = '';
+    if (allowedGameIds !== null) {
+      where += ' AND c.game_id IN (SELECT value FROM json_each(?))';
+      bindings.push(JSON.stringify(allowedGameIds));
+    }
     if (daily !== null) {
       where += ' AND c.daily = ?';
       bindings.push(daily);
@@ -816,20 +863,33 @@ export class Store {
   // ---------- the LP's read-only view (club.md §18) ----------
 
   /** The live challenges tagged with `daily`, oldest first, at most `limit`. */
-  dailyChallenges(daily: string, limit: number): DailyChallengeRow[] {
-    return this.db
-      .all(
-        `SELECT id, game_id, daily, result_count FROM challenges
-         WHERE daily = ? AND deleted_at IS NULL ORDER BY seq LIMIT ?`,
-        daily,
-        limit,
-      )
-      .map((row) => ({
-        id: text(row, 'id'),
-        gameId: text(row, 'game_id'),
-        daily: text(row, 'daily'),
-        resultCount: int(row, 'result_count'),
-      }));
+  /**
+   * `gameIds` (the club's enabled games; null for all) is applied before the limit, so
+   * disabled games cannot crowd the enabled ones out of the page (`filteredTop`).
+   */
+  dailyChallenges(
+    daily: string,
+    limit: number,
+    gameIds: readonly string[] | null = null,
+  ): DailyChallengeRow[] {
+    return filteredTop(
+      gameIds,
+      limit,
+      (ids) =>
+        this.db.all(
+          `SELECT seq, id, game_id, daily, result_count FROM challenges
+           WHERE daily = ? AND deleted_at IS NULL${inList(ids, ' AND')} ORDER BY seq LIMIT ?`,
+          daily,
+          ...(ids ?? []),
+          limit,
+        ),
+      (x, y) => Number(x.seq) - Number(y.seq),
+    ).map((row) => ({
+      id: text(row, 'id'),
+      gameId: text(row, 'game_id'),
+      daily: text(row, 'daily'),
+      resultCount: int(row, 'result_count'),
+    }));
   }
 
   /**
@@ -1270,18 +1330,39 @@ export class Store {
    * page's view. Read straight off `ranking_tables_popular`, so the cost is `limit`
    * rows whatever the number of tables.
    */
-  popularRankingTables(limit: number): { gameId: string; paramsKey: string; entryCount: number }[] {
-    return this.db
-      .all(
-        `SELECT game_id, params_key, entry_count FROM ranking_tables
+  /**
+   * `gameIds` is applied before the limit, as in `dailyChallenges`. With an allowlist each
+   * game's own top `limit` is read off `ranking_tables_game_popular` and the lists merged:
+   * at most `limit` rows per enabled game, however many tables (`paramsKey` is the client's).
+   */
+  popularRankingTables(
+    limit: number,
+    gameIds: readonly string[] | null = null,
+  ): { gameId: string; paramsKey: string; entryCount: number }[] {
+    const query = (where: string, ...params: SqlValue[]) =>
+      this.db.all(
+        `SELECT game_id, params_key, entry_count FROM ranking_tables ${where}
          ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+        ...params,
         limit,
-      )
-      .map((row) => ({
-        gameId: text(row, 'game_id'),
-        paramsKey: text(row, 'params_key'),
-        entryCount: int(row, 'entry_count'),
-      }));
+      );
+    const rows =
+      gameIds === null
+        ? query('')
+        : gameIds
+            .flatMap((gameId) => query('WHERE game_id = ?', gameId))
+            .sort(
+              (x, y) =>
+                Number(y.entry_count) - Number(x.entry_count) ||
+                binary(String(x.game_id), String(y.game_id)) ||
+                binary(String(x.params_key), String(y.params_key)),
+            )
+            .slice(0, limit);
+    return rows.map((row) => ({
+      gameId: text(row, 'game_id'),
+      paramsKey: text(row, 'params_key'),
+      entryCount: int(row, 'entry_count'),
+    }));
   }
 
   /** `GET /records`: the leaders of the rankings in the old shape (club.md §16-1). */

@@ -15,6 +15,7 @@ import * as v from '../validate.js';
 import { axisValue, contractOf } from '../contracts/games.js';
 import { iso, type Deps } from './deps.js';
 import { rankingEntryShape, rankingMineShape, rankingStandingShape } from './shape.js';
+import { gameFilter, requireGameAllowed } from './settings.js';
 
 /** A row id as the wire carries it (`Entry.id`): a positive integer in decimal, or nothing. */
 const rowId = (raw: string | undefined): number | null => {
@@ -36,6 +37,7 @@ export function registerRankings(router: Router, deps: Deps): void {
       const contractVersion = v.contractVersion(body.contractVersion);
       if (contractVersion !== API_VERSION) throw unsupportedVersion(contractVersion);
       const gameId = v.gameId(body.gameId);
+      requireGameAllowed(deps, gameId);
       const paramsKey = v.paramsKey(body.paramsKey);
       v.smallObject(body.params, 'params', limits.smallJsonBytes); // checked, not stored or read
       const seed = v.seedOrEmpty(body.seed);
@@ -98,19 +100,25 @@ export function registerRankings(router: Router, deps: Deps): void {
 
   router.add('GET', '/api/v1/rankings', { auth: 'member', limit: 'member' }, () => ({
     status: 200,
-    body: store.rankingTables().map((table) => ({
-      gameId: table.gameId,
-      paramsKey: table.paramsKey,
-      entryCount: table.entryCount,
-      leader: rankingEntryShape(table.leader),
-    })),
+    body: store
+      .rankingTables()
+      .filter(gameFilter(deps))
+      .map((table) => ({
+        gameId: table.gameId,
+        paramsKey: table.paramsKey,
+        entryCount: table.entryCount,
+        leader: rankingEntryShape(table.leader),
+      })),
   }));
 
   // The tables the caller has rows in (club.md §5-4). Registered before the table route; the
   // two never meet (four path segments here, five there), but the literal reads first.
   router.add('GET', '/api/v1/rankings/mine', { auth: 'member', limit: 'member' }, (ctx) => ({
     status: 200,
-    body: store.rankingsMine(ctx.member!.id, limits.rankingMineScan).map(rankingMineShape),
+    body: store
+      .rankingsMine(ctx.member!.id, limits.rankingMineScan)
+      .filter(gameFilter(deps))
+      .map(rankingMineShape),
   }));
 
   router.add(
@@ -119,6 +127,7 @@ export function registerRankings(router: Router, deps: Deps): void {
     { auth: 'member', limit: 'member' },
     (ctx) => {
       const { gameId, paramsKey } = ctx.params as { gameId: string; paramsKey: string };
+      requireGameAllowed(deps, gameId);
       const top = v.top(ctx.query.get('top'), limits.rankingTop, limits.rankingTopMax);
       // An unknown game or table is simply an empty one: a table exists when it has rows.
       const best = store.bestOf(gameId, paramsKey, ctx.member!.id);

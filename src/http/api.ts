@@ -18,6 +18,9 @@ import { registerMembers } from '../api/members.js';
 import { registerPublic } from '../api/public.js';
 import { registerRankings } from '../api/rankings.js';
 import { registerRecords } from '../api/records.js';
+import { registerSettings } from '../api/settings.js';
+import { registerJoinRequests } from '../api/joinRequests.js';
+import { registerOwnerRecords } from '../api/ownerRecords.js';
 import { bearerToken, hashToken } from '../auth/tokens.js';
 import type { Store } from '../db/store.js';
 import { API_VERSION, DEFAULT_LIMITS, type Limits } from '../limits.js';
@@ -82,6 +85,9 @@ export function createApi(options: ApiOptions): Api {
   registerInvites(router, deps);
   registerMembers(router, deps);
   registerPublic(router, deps);
+  registerSettings(router, deps);
+  registerJoinRequests(router, deps);
+  registerOwnerRecords(router, deps);
 
   // In memory, per process — or per Durable Object, which is one process for
   // its club. A restart forgets the last minute; nothing worse.
@@ -101,7 +107,7 @@ export function createApi(options: ApiOptions): Api {
     const headers: Record<string, string> = {
       [API_VERSION_HEADER]: API_VERSION_VALUE,
       'Cache-Control': 'no-store',
-      ...corsHeaders(request.header('origin'), request.origin, config.corsOrigins),
+      ...corsHeaders(request.header('origin'), new URL(request.origin).origin, config.corsOrigins),
     };
     if (request.method === 'OPTIONS') return { status: 204, headers, body: null };
 

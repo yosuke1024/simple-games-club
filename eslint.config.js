@@ -4,7 +4,16 @@ import tseslint from 'typescript-eslint';
 // The same base rules as simple-games (packages/eslint-config/base.js), inlined
 // because this repository is not part of that workspace.
 export default tseslint.config(
-  { ignores: ['dist/', 'dist-worker/', '.wrangler/', 'node_modules/', 'web/'] },
+  {
+    ignores: [
+      'dist/',
+      'dist-worker/',
+      'dist-worker-staging/',
+      '.wrangler/',
+      'node_modules/',
+      'web/',
+    ],
+  },
   js.configs.recommended,
   tseslint.configs.recommended,
   {

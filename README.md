@@ -2,7 +2,7 @@
 
 The server behind **Club House**, the optional layer of
 [Simple Games by PixApps](https://github.com/yosuke1024/simple-games).
-One deployment is one club: people playing the same puzzles on their own
+In self-hosted mode, one deployment is one club: people playing the same puzzles on their own
 devices and bringing only the results together. It runs in two shapes from the
 same source — a Node process with a SQLite file, or a Cloudflare Worker with a
 Durable Object — and the same contract tests prove both.
@@ -15,13 +15,25 @@ passwords or e-mail addresses, no notifications, and nothing runs in the
 background. Results are compared only within one challenge — the same board,
 the same mode — and nothing accumulates across challenges.
 
-Whoever creates a club hosts it, pays for it and can delete it. The product
+In self-hosted mode, whoever creates a club hosts it, pays for it and can delete it. The product
 decisions live in the simple-games repository: `docs/PRODUCT_PRINCIPLES.md`
 「Club House」 draws the boundary, `docs/architecture/club.md` is the contract
 this server implements.
 
 **Status: pre-release.** The client side (`src/club/` in simple-games) is not
 shipped yet. This server exists so it can be built against something real.
+
+**Managed hosting implementation preview (2026-10-23):** the Cloudflare deployment
+at club.pixapps.ai also hosts multiple owner-created clubs, beside the Public club on the
+same origin (`/clubs/<id>`, decision 2026-10-24). Free, self-service Trial allows
+one club of five members with no automatic expiration. Basic allows three clubs of
+50 active members each, including the owner; future Plus and MAX definitions are
+present but unavailable. The matching client and product contract live in
+simple-games `docs/architecture/managed-clubs.md`. See [the managed runbook](docs/managed.md)
+for configuration, Trial bootstrap, operator-issued Basic upgrades, the conditional
+50-member owner ad-removal benefit, access-key recovery and release
+gates. Pricing and checkout are not implemented, and this does not deploy or alter
+the existing public service.
 
 ## Deploy
 
@@ -143,9 +155,27 @@ deployment (`test/units.test.ts` checks `wrangler.toml`).
 
 The server answers `/` and `/join` with the Simple Games web build when one is
 present in `CLUB_WEB_DIR` (`index.html` plus `assets/`). It is a release
-artifact of the simple-games repository — the `dist-web/` output of its
-`web-build.yml` workflow — not something built here. Copy its contents into
-`web/` before `docker build`, or mount a directory at runtime.
+artifact of the simple-games repository, not something built here. Copy a
+`dist-web/` into `web/` before `docker build`, or mount a directory at runtime.
+
+For the Cloudflare deployments, `pnpm build:web` builds it from a clean
+simple-games checkout and replaces `web/` with it:
+
+```sh
+pnpm build:web ../simple-games                          # for club.pixapps.ai (wrangler.toml)
+pnpm build:web ../simple-games https://simple-games-club-staging.<account>.workers.dev
+pnpm deploy:production                                  # checks web/ was built for club.pixapps.ai, then deploys
+pnpm exec wrangler deploy --config wrangler.staging.toml
+```
+
+The copy is built for the origin it is served from: managed invites to that
+origin open in it even while the app's `MANAGED_CLUBS_ENABLED` is still false.
+It carries no ads and no analytics (every `VITE_` ad and GA variable is set
+empty). `web/.build-info.json` records the simple-games commit and the origin;
+it is not uploaded (`web/.assetsignore`). `pnpm deploy:production` refuses a
+copy built for another origin or from uncommitted changes.
+The copy asks for pixapps.ai's `/global-header.js` and `.css`, which this origin
+does not have; the app is built to do without them (two 404s, no header).
 
 Without a build the server still works: `/` and `/join` show a one-line notice
 and the API is fully usable. `/join/` (with a slash) redirects to `/join`,

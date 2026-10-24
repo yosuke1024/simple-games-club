@@ -10,6 +10,7 @@ import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
 import { challengeShape, resultShape } from './shape.js';
+import { requireGameAllowed, settingsOf } from './settings.js';
 
 export function registerChallenges(router: Router, deps: Deps): void {
   const { store, limits } = deps;
@@ -17,7 +18,13 @@ export function registerChallenges(router: Router, deps: Deps): void {
   router.add('GET', '/api/v1/challenges', { auth: 'member', limit: 'member' }, (ctx) => {
     const after = ctx.query.get('after');
     const daily = ctx.query.has('daily') ? v.dailyQuery(ctx.query.get('daily')) : null;
-    const rows = store.listChallenges(ctx.member!.id, after, limits.challengePage, daily);
+    const rows = store.listChallenges(
+      ctx.member!.id,
+      after,
+      limits.challengePage,
+      daily,
+      settingsOf(deps).allowedGameIds,
+    );
     return { status: 200, body: rows.map(challengeShape) };
   });
 
@@ -27,6 +34,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
     const contractVersion = v.contractVersion(body.contractVersion);
     if (contractVersion !== API_VERSION) throw unsupportedVersion(contractVersion);
     const gameId = v.gameId(body.gameId);
+    requireGameAllowed(deps, gameId);
     const params = v.smallObject(body.params, 'params', limits.smallJsonBytes);
     const seed = v.seed(body.seed);
     const boardDigest = v.boardDigest(body.boardDigest);
@@ -92,6 +100,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
   router.add('GET', '/api/v1/challenges/:id', { auth: 'member', limit: 'member' }, (ctx) => {
     const challenge = store.challengeById(ctx.params.id!, ctx.member!.id);
     if (challenge === null) throw notFound('no such challenge');
+    requireGameAllowed(deps, challenge.gameId);
     return { status: 200, body: challengeShape(challenge) };
   });
 
@@ -114,6 +123,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
       const member = ctx.member!;
       const challenge = store.challengeById(ctx.params.id!, member.id);
       if (challenge === null) throw notFound('no such challenge');
+      requireGameAllowed(deps, challenge.gameId);
       // The best `resultsPage` by the game's axis, best first, and the caller's own row
       // wherever it ranks (club.md §5-3) — not the first ones to arrive.
       return {
@@ -138,6 +148,7 @@ export function registerChallenges(router: Router, deps: Deps): void {
 
       const challenge = store.challengeById(ctx.params.id!, member.id);
       if (challenge === null) throw notFound('no such challenge');
+      requireGameAllowed(deps, challenge.gameId);
       // Nothing is stored on either 409 (club.md §5-4).
       if (challenge.boardDigest !== boardDigest) {
         throw conflict(

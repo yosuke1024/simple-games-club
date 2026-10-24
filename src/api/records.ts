@@ -6,10 +6,11 @@
  */
 import type { Router } from '../http/router.js';
 import type { Deps } from './deps.js';
+import { gameFilter } from './settings.js';
 
 export function registerRecords(router: Router, deps: Deps): void {
   router.add('GET', '/api/v1/records', { auth: 'member', limit: 'member' }, () => ({
     status: 200,
-    body: deps.store.records(),
+    body: deps.store.records().filter(gameFilter(deps)),
   }));
 }

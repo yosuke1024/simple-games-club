@@ -6,7 +6,15 @@ import { join } from 'node:path';
 import { createApp } from '../../src/app.js';
 import type { Config } from '../../src/config.js';
 import { openDatabase, type NodeDatabase } from '../../src/db/database.js';
-import { DEFAULTS, apiCaller, newClock, type ServerOptions, type TestServer } from '../helpers.js';
+import {
+  DEFAULTS,
+  MANAGED_ADMIN_KEY,
+  MANAGED_SECRET,
+  apiCaller,
+  newClock,
+  type ServerOptions,
+  type TestServer,
+} from '../helpers.js';
 
 export async function startNodeServer(overrides: Partial<ServerOptions>): Promise<TestServer> {
   const dir = mkdtempSync(join(tmpdir(), 'sg-club-'));
@@ -15,6 +23,7 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
   let db: NodeDatabase | null = null;
   let server: Server | null = null;
   let url = '';
+  let closeApp = (): void => {};
 
   const listen = async (): Promise<void> => {
     const config: Config = {
@@ -30,6 +39,13 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
       openJoin: options.openJoin,
       trustProxy: true,
       log: false,
+      managedHosting: options.managed
+        ? {
+            secret: MANAGED_SECRET,
+            adminKey: MANAGED_ADMIN_KEY,
+            corsOrigins: options.corsOrigins,
+          }
+        : null,
     };
     db = openDatabase(join(dir, 'club.sqlite'));
     const app = createApp({
@@ -38,6 +54,7 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
       now: () => new Date(clock.now),
       limits: options.limits,
     });
+    closeApp = app.close;
     server = createServer(app.handle);
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address();
@@ -53,6 +70,7 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
         closing.close((error) => (error ? reject(error) : resolve())),
       );
     }
+    closeApp();
     db?.close();
     db = null;
   };

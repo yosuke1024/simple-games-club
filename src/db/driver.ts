@@ -62,6 +62,9 @@ export function migrate(db: SqlDriver): void {
   if (stored < 4) upgradeToV4(db);
   if (stored < 5) upgradeToV5(db);
   if (stored < 6) upgradeToV6(db);
+  // v7 adds club settings, pending admissions and owner record albums. SCHEMA_SQL
+  // creates these tables idempotently; existing member/result rows need no rewrite.
+  if (stored < 7) db.run(`UPDATE meta SET value = '7' WHERE key = 'schema_version'`);
   addRankingClientId(db);
   db.exec(RANKING_INDEX_SQL);
   db.exec(RANKING_CLIENT_INDEX_SQL);

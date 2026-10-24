@@ -12,6 +12,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "build:worker": "wrangler deploy --dry-run --outdir dist-worker",
+    "build:web": "node scripts/build-web.mjs",
+    "deploy:production": "node scripts/build-web.mjs --check https://club.pixapps.ai && wrangler deploy",
+    "build:staging": "wrangler deploy --dry-run --config wrangler.staging.toml --outdir dist-worker-staging",
     "start": "node --disable-warning=ExperimentalWarning dist/server.js",
     "dev": "pnpm build && CLUB_DATA_DIR=./data pnpm start",
     "dev:worker": "wrangler dev",

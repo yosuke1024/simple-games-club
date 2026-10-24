@@ -31,6 +31,7 @@ const shutdown = (): void => {
   if (closing) return;
   closing = true;
   server.close(() => {
+    app.close();
     db.close();
     process.exit(0);
   });

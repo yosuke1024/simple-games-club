@@ -176,7 +176,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
     expect(d.get(`SELECT result_count, daily FROM challenges WHERE id = 'ch1'`)).toEqual({
       result_count: 2,
       daily: null,
@@ -210,7 +210,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'records'`)).toBeUndefined();
     expect(d.all(`SELECT * FROM ranking_entries`)).toEqual([]);
     expect(
@@ -650,7 +650,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // and again: nothing changes
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('6');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
     expect(d.all(`SELECT seq, member_id, value, client_id FROM ranking_entries`)).toEqual([
       { seq: 1, member_id: 'a', value: 300, client_id: null },
     ]);

@@ -16,6 +16,8 @@ import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
 import { clubShape, memberShape } from './shape.js';
+import { settingsOf } from './settings.js';
+import { requestAdmission } from './joinRequests.js';
 
 export function registerAccess(router: Router, deps: Deps): void {
   const { store, config, limits } = deps;
@@ -77,9 +79,12 @@ export function registerAccess(router: Router, deps: Deps): void {
 
   router.add('POST', '/api/v1/join', { auth: 'none', limit: 'ip' }, async (ctx) => {
     const body = await ctx.body();
-    // The token is optional only where anyone may join (CLUB_OPEN_JOIN).
+    // Discovery and approval are independent: public clubs need no invitation, but
+    // approval still creates a pending request rather than a member credential.
+    const settings = settingsOf(deps);
     const tokenAbsent = body.inviteToken === undefined || body.inviteToken === null;
-    if (tokenAbsent && !config.openJoin) throw invalidRequest('inviteToken is required');
+    if (tokenAbsent && settings.visibility !== 'public')
+      throw invalidRequest('inviteToken is required');
     const inviteToken = tokenAbsent ? null : v.secretField(body.inviteToken, 'inviteToken');
     const nickname = v.nickname(body.nickname);
 
@@ -88,6 +93,7 @@ export function registerAccess(router: Router, deps: Deps): void {
 
     const nowIso = iso(ctx.now);
     if (inviteToken === null) {
+      if (settings.approvalRequired) return requestAdmission(deps, ctx, nickname);
       if (store.countActive() >= limits.maxMembers) {
         throw conflict('too_many_members', `a club has at most ${limits.maxMembers} members`);
       }
@@ -112,6 +118,12 @@ export function registerAccess(router: Router, deps: Deps): void {
       invite.usedAt === null &&
       (invite.expiresAt === null || invite.expiresAt > nowIso);
     if (!usable) throw conflict('invite_expired', 'the invite is no longer valid');
+
+    // A normal invite proves access to a private entrance; it never bypasses approval.
+    // An owner link is the existing owner's explicit, one-use appointment of a co-owner.
+    if (invite.role === 'member' && settings.approvalRequired) {
+      return requestAdmission(deps, ctx, nickname);
+    }
 
     if (store.countActive() >= limits.maxMembers) {
       throw conflict('too_many_members', `a club has at most ${limits.maxMembers} members`);

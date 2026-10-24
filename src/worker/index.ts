@@ -17,11 +17,12 @@ import { DurableObject } from 'cloudflare:workers';
 import { migrate, type SqlDriver } from '../db/driver.js';
 import { Store } from '../db/store.js';
 import { API_VERSION_HEADER, API_VERSION_VALUE, createApi, type Api } from '../http/api.js';
-import { corsHeaders } from '../http/cors.js';
 import { PLACEHOLDER_HTML } from '../http/placeholder.js';
 import { sqlDriver, type RowCounter } from './driver.js';
 import { apiConfigFrom, settingsFrom, type Env, type WorkerSettings } from './env.js';
 import { randomHex } from '../auth/tokens.js';
+import { isManagedPath } from '../managed/plans.js';
+export { ManagedDirectoryObject, ManagedClubObject } from './managed.js';
 
 /** The object's name when `CLUB_OBJECT_NAME` is not set. */
 const DEFAULT_OBJECT_NAME = 'club';
@@ -98,60 +99,29 @@ async function servePage(request: Request, url: URL, env: Env): Promise<Response
   });
 }
 
-/**
- * `GET /api/v1/public` is answered from `caches.default` for the five minutes
- * its `Cache-Control` names (club.md §18): a hit never reaches the object. The
- * key is the object's name, the date (resolved, never blank) and — only for an origin CORS would allow — that origin,
- * because the cached response carries its `Access-Control-Allow-Origin`; an
- * arbitrary `Origin` header cannot mint keys. Only a 200 is stored.
- */
-async function servePublic(
-  request: Request,
-  url: URL,
-  env: Env,
-  ctx: ExecutionContext,
-  settings: WorkerSettings,
-  forward: () => Promise<Response>,
-): Promise<Response> {
-  const given = url.searchParams.get('date');
-  if (given !== null && !/^\d{4}-\d{2}-\d{2}$/.test(given)) return forward();
-  // No date means "today" on the object's clock: resolved here so the key never
-  // outlives the day it was made for.
-  const date = given ?? requestNow(request, settings.testMode).toISOString().slice(0, 10);
-  const origin = request.headers.get('origin');
-  const selfUrlOrigin = selfOrigin(request, url, settings);
-  const allowed =
-    origin !== null &&
-    Object.keys(corsHeaders(origin, selfUrlOrigin, apiConfigFrom(env, '').corsOrigins)).length > 0;
-  const objectName = env.CLUB_OBJECT_NAME?.trim() || DEFAULT_OBJECT_NAME;
-  const key = new Request(
-    `${url.origin}${url.pathname}?object=${encodeURIComponent(objectName)}&date=${date}&origin=${allowed ? encodeURIComponent(origin) : ''}`,
-  );
-  const cache = caches.default;
-  const hit = await cache.match(key);
-  if (hit !== undefined) return hit;
-  const response = await forward();
-  if (response.status === 200) ctx.waitUntil(cache.put(key, response.clone()));
-  return response;
-}
-
 export default {
-  async fetch(request, env, ctx): Promise<Response> {
+  async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith('/api/')) return servePage(request, url, env);
+    if (!url.pathname.startsWith('/api/') && !isManagedPath(url.pathname))
+      return servePage(request, url, env);
 
     const settings = settingsFrom(env);
     const forwarded = new Request(request);
     forwarded.headers.set(CLIENT_IP_HEADER, clientIp(request, settings.trustProxy));
     forwarded.headers.set(ORIGIN_HEADER, selfOrigin(request, url, settings));
+    if (
+      isManagedPath(url.pathname) &&
+      env.CLUB_MANAGED_ENABLED === '1' &&
+      env.MANAGED_DIRECTORY !== undefined
+    ) {
+      return env.MANAGED_DIRECTORY.get(env.MANAGED_DIRECTORY.idFromName('managed-v1')).fetch(
+        forwarded,
+      );
+    }
     const stub = env.CLUB.get(
       env.CLUB.idFromName(env.CLUB_OBJECT_NAME?.trim() || DEFAULT_OBJECT_NAME),
     );
-    const forward = () => stub.fetch(forwarded);
-    if (request.method === 'GET' && url.pathname === '/api/v1/public') {
-      return servePublic(request, url, env, ctx, settings, forward);
-    }
-    return forward();
+    return stub.fetch(forwarded);
   },
 } satisfies ExportedHandler<Env>;
 

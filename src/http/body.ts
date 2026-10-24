@@ -49,3 +49,28 @@ export async function readJsonObject(body: BodySource, limit: number): Promise<J
   if (!isObject(parsed)) throw invalidRequest('body must be a JSON object');
   return parsed;
 }
+
+/**
+ * The whole body as bytes, at most `limit` of them (413 beyond), whatever its type.
+ * For a proxy that must finish reading the client before it queues the request.
+ */
+export async function readBytes(body: BodySource, limit: number): Promise<Uint8Array> {
+  const declared = Number(body.contentLength);
+  if (Number.isFinite(declared) && declared > limit) {
+    throw tooLarge(`body exceeds ${limit} bytes`);
+  }
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for await (const chunk of body.chunks()) {
+    received += chunk.byteLength;
+    if (received > limit) throw tooLarge(`body exceeds ${limit} bytes`);
+    chunks.push(chunk);
+  }
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
