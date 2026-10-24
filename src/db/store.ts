@@ -225,32 +225,38 @@ const CHALLENGE_SELECT = `
   JOIN members m ON m.id = c.created_by
   WHERE c.deleted_at IS NULL`;
 
-/** How many rows a filtered list reads at most, past the rows it keeps (`filteredPages`). */
-export const FILTERED_SCAN = 512;
-const FILTERED_PAGE = 64;
+/**
+ * Game ids bound per query. Durable Objects bind at most 100 parameters and an allowlist
+ * may name 128 games, so a filtered list asks in chunks; each chunk keeps its own top
+ * `limit`, and the chunks' rows are merged in the query's order (`filteredTop`).
+ */
+const GAME_ID_CHUNK = 90;
 
 /**
- * The first `limit` rows whose `game_id` is in `gameIds` (all rows when null), read in the
- * query's own order a page at a time and never more than `FILTERED_SCAN` rows in all.
+ * The first `limit` rows, in `order`, whose game is in `gameIds` (every row when null):
+ * no row past a cutoff is lost, since each chunk's query applies the limit itself.
  */
-function filteredPages(
+function filteredTop(
   gameIds: readonly string[] | null,
   limit: number,
-  page: (offset: number, count: number) => Row[],
+  query: (gameIds: readonly string[] | null) => Row[],
+  order: (a: Row, b: Row) => number,
 ): Row[] {
-  if (gameIds === null) return page(0, limit);
-  const allowed = new Set(gameIds);
-  const kept: Row[] = [];
-  for (let offset = 0; offset < FILTERED_SCAN && kept.length < limit; offset += FILTERED_PAGE) {
-    const rows = page(offset, Math.min(FILTERED_PAGE, FILTERED_SCAN - offset));
-    for (const row of rows) {
-      if (allowed.has(String(row.game_id))) kept.push(row);
-      if (kept.length === limit) break;
-    }
-    if (rows.length < FILTERED_PAGE) break;
+  if (gameIds === null) return query(null);
+  if (gameIds.length === 0) return [];
+  if (gameIds.length <= GAME_ID_CHUNK) return query(gameIds);
+  const rows: Row[] = [];
+  for (let i = 0; i < gameIds.length; i += GAME_ID_CHUNK) {
+    rows.push(...query(gameIds.slice(i, i + GAME_ID_CHUNK)));
   }
-  return kept;
+  return rows.sort(order).slice(0, limit);
 }
+
+/** SQLite's own text order (BINARY), not the locale's. */
+const binary = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+const inList = (gameIds: readonly string[] | null, prefix: string): string =>
+  gameIds === null ? '' : `${prefix} game_id IN (${gameIds.map(() => '?').join(', ')})`;
 
 export class Store {
   readonly policy: PolicyStore;
@@ -859,23 +865,25 @@ export class Store {
   /** The live challenges tagged with `daily`, oldest first, at most `limit`. */
   /**
    * `gameIds` (the club's enabled games; null for all) is applied before the limit, so
-   * disabled games cannot crowd the enabled ones out of the page. The filter runs on
-   * indexed pages, not as an `IN` list: Durable Objects bind at most 100 parameters and
-   * an allowlist may name 128 games, and the read stays bounded (`FILTERED_SCAN`).
+   * disabled games cannot crowd the enabled ones out of the page (`filteredTop`).
    */
   dailyChallenges(
     daily: string,
     limit: number,
     gameIds: readonly string[] | null = null,
   ): DailyChallengeRow[] {
-    return filteredPages(gameIds, limit, (offset, count) =>
-      this.db.all(
-        `SELECT id, game_id, daily, result_count FROM challenges
-         WHERE daily = ? AND deleted_at IS NULL ORDER BY seq LIMIT ? OFFSET ?`,
-        daily,
-        count,
-        offset,
-      ),
+    return filteredTop(
+      gameIds,
+      limit,
+      (ids) =>
+        this.db.all(
+          `SELECT seq, id, game_id, daily, result_count FROM challenges
+           WHERE daily = ? AND deleted_at IS NULL${inList(ids, ' AND')} ORDER BY seq LIMIT ?`,
+          daily,
+          ...(ids ?? []),
+          limit,
+        ),
+      (x, y) => Number(x.seq) - Number(y.seq),
     ).map((row) => ({
       id: text(row, 'id'),
       gameId: text(row, 'game_id'),
@@ -1327,13 +1335,20 @@ export class Store {
     limit: number,
     gameIds: readonly string[] | null = null,
   ): { gameId: string; paramsKey: string; entryCount: number }[] {
-    return filteredPages(gameIds, limit, (offset, count) =>
-      this.db.all(
-        `SELECT game_id, params_key, entry_count FROM ranking_tables
-         ORDER BY entry_count DESC, game_id, params_key LIMIT ? OFFSET ?`,
-        count,
-        offset,
-      ),
+    return filteredTop(
+      gameIds,
+      limit,
+      (ids) =>
+        this.db.all(
+          `SELECT game_id, params_key, entry_count FROM ranking_tables${inList(ids, ' WHERE')}
+           ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+          ...(ids ?? []),
+          limit,
+        ),
+      (x, y) =>
+        Number(y.entry_count) - Number(x.entry_count) ||
+        binary(String(x.game_id), String(y.game_id)) ||
+        binary(String(x.params_key), String(y.params_key)),
     ).map((row) => ({
       gameId: text(row, 'game_id'),
       paramsKey: text(row, 'params_key'),

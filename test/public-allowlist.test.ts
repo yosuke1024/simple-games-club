@@ -18,7 +18,7 @@ afterEach(() => {
   db = null;
 });
 
-async function publicFeed(fill: (store: Store) => void) {
+async function publicFeed(fill: (store: Store) => void, allowedGameIds = ['sudoku']) {
   db = openDatabase(':memory:');
   const store = new Store(db.driver);
   store.createClub('c_allowlist001', 'Allowlist', NOW);
@@ -27,7 +27,7 @@ async function publicFeed(fill: (store: Store) => void) {
   store.policy.saveSettings({
     visibility: 'public',
     approvalRequired: false,
-    allowedGameIds: ['sudoku'],
+    allowedGameIds,
   });
   const api = createApi({
     store,
@@ -78,6 +78,40 @@ describe.skipIf(process.env.CLUB_IMPL === 'workers')('GET /api/v1/public allowli
       store.addRanking(ranking('sudoku', 'hard', 300));
     });
     expect(feed.rankings.map((table) => table.gameId)).toEqual(['sudoku']);
+  });
+
+  it('keeps an enabled table however many disabled tables come before it', async () => {
+    const feed = await publicFeed((store) => {
+      for (let i = 0; i < 600; i++) {
+        store.addRanking(ranking('2048', `mode${i}`, 100));
+        store.addRanking(ranking('2048', `mode${i}`, 101));
+      }
+      store.addRanking(ranking('sudoku', 'hard', 300));
+    });
+    expect(feed.rankings.map((table) => table.gameId)).toEqual(['sudoku']);
+  });
+
+  it('merges the most-entered tables across a 128-game allowlist, in order', async () => {
+    // More ids than one query binds: the busiest table sits in the second chunk.
+    const ids = Array.from({ length: 128 }, (_, i) => `game-${String(i).padStart(3, '0')}`);
+    const feed = await publicFeed((store) => {
+      for (const [index, entries] of [
+        [127, 3],
+        [0, 2],
+        [64, 1],
+      ] as const) {
+        for (let n = 0; n < entries; n++) store.addRanking(ranking(ids[index]!, 'mode', 100 + n));
+      }
+    }, ids);
+    expect(feed.rankings.map((table) => table.gameId)).toEqual([ids[127], ids[0], ids[64]]);
+  });
+
+  it('reads nothing for an empty allowlist', async () => {
+    const feed = await publicFeed((store) => {
+      store.addRanking(ranking('sudoku', 'hard', 300));
+    }, []);
+    expect(feed.rankings).toEqual([]);
+    expect(feed.today).toEqual([]);
   });
 
   it("keeps an enabled game's daily when disabled dailies fill the page", async () => {
