@@ -139,6 +139,7 @@ function harness(onDescribe?: (snapshot: ManagedMetadata) => Promise<ManagedMeta
     edit: (visibility: unknown, token?: string) =>
       api.handle(apiRequest('PATCH', `/clubs/${CLUB_ID}/api/v1/settings`, { visibility }, token)),
     read: () => api.handle(apiRequest('GET', `/clubs/${CLUB_ID}/api/v1/club`)),
+    handle: (request: ApiRequest) => api.handle(request),
     owner: () => api.handle(apiRequest('GET', '/api/v1/managed/owner')),
     listed: () => store.directory(null, NOW.toISOString()).clubs,
   };
@@ -253,6 +254,43 @@ describe.skipIf(process.env.CLUB_IMPL === 'workers')('managed metadata synchroni
     const h = harness();
     expect((await h.edit('private', 'wrong-token')).status).toBe(401);
     expect(h.listed().map((club) => club.id)).toEqual([CLUB_ID]);
+  });
+
+  it("does not let an unfinished upload hold the club's change queue", async () => {
+    const h = harness();
+    const upload = deferred();
+    // Authorized, so the tenant goes on to read the body — as a join does with any caller.
+    const stalled = apiRequest('PATCH', `/clubs/${CLUB_ID}/api/v1/settings`);
+    const bytes = new TextEncoder().encode(JSON.stringify({ visibility: 'private' }));
+    stalled.body = {
+      contentType: 'application/json',
+      contentLength: String(bytes.byteLength),
+      async *chunks() {
+        await upload.promise;
+        yield bytes;
+      },
+    };
+    const slow = h.handle(stalled);
+    const raced = await Promise.race([
+      h.edit('private').then((reply) => reply.status),
+      new Promise((done) => setTimeout(() => done('blocked'), 500)),
+    ]);
+    expect(raced).toBe(200);
+    upload.resolve();
+    expect((await slow).status).toBe(200);
+  });
+
+  it('keeps a committed change when the directory refresh after it fails', async () => {
+    // A join's member token is only in its response; a 500 would strand the membership.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let fail = false;
+    const h = harness(async (snapshot) => {
+      if (fail) throw new Error('describe failed');
+      return snapshot;
+    });
+    fail = true;
+    expect((await h.edit('private')).status).toBe(200);
+    expect(h.model.edits).toEqual(['private']);
   });
 
   it('keeps a lost acknowledgement hidden and releases the lock for a safe retry', async () => {

@@ -830,12 +830,23 @@ export class Store {
   // ---------- the LP's read-only view (club.md §18) ----------
 
   /** The live challenges tagged with `daily`, oldest first, at most `limit`. */
-  dailyChallenges(daily: string, limit: number): DailyChallengeRow[] {
+  /**
+   * `gameIds` (the club's enabled games; null for all) is applied before the limit, so
+   * disabled games cannot crowd the enabled ones out of the page.
+   */
+  dailyChallenges(
+    daily: string,
+    limit: number,
+    gameIds: readonly string[] | null = null,
+  ): DailyChallengeRow[] {
+    if (gameIds !== null && gameIds.length === 0) return [];
+    const only = gameIds === null ? '' : ` AND game_id IN (${gameIds.map(() => '?').join(', ')})`;
     return this.db
       .all(
         `SELECT id, game_id, daily, result_count FROM challenges
-         WHERE daily = ? AND deleted_at IS NULL ORDER BY seq LIMIT ?`,
+         WHERE daily = ? AND deleted_at IS NULL${only} ORDER BY seq LIMIT ?`,
         daily,
+        ...(gameIds ?? []),
         limit,
       )
       .map((row) => ({
@@ -1284,11 +1295,18 @@ export class Store {
    * page's view. Read straight off `ranking_tables_popular`, so the cost is `limit`
    * rows whatever the number of tables.
    */
-  popularRankingTables(limit: number): { gameId: string; paramsKey: string; entryCount: number }[] {
+  /** `gameIds` is applied before the limit, as in `dailyChallenges`. */
+  popularRankingTables(
+    limit: number,
+    gameIds: readonly string[] | null = null,
+  ): { gameId: string; paramsKey: string; entryCount: number }[] {
+    if (gameIds !== null && gameIds.length === 0) return [];
+    const only = gameIds === null ? '' : `WHERE game_id IN (${gameIds.map(() => '?').join(', ')}) `;
     return this.db
       .all(
         `SELECT game_id, params_key, entry_count FROM ranking_tables
-         ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+         ${only}ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+        ...(gameIds ?? []),
         limit,
       )
       .map((row) => ({

@@ -13,7 +13,7 @@ import { notFound } from '../http/errors.js';
 import type { Router } from '../http/router.js';
 import * as v from '../validate.js';
 import { iso, type Deps } from './deps.js';
-import { gameFilter, settingsOf } from './settings.js';
+import { settingsOf } from './settings.js';
 
 const TOP = 3;
 /** How many ranking tables the landing page shows: the most-entered ones. */
@@ -34,41 +34,36 @@ export function registerPublic(router: Router, deps: Deps): void {
     const rawDate = ctx.query.get('date');
     const date = rawDate === null ? iso(ctx.now).slice(0, 10) : v.dailyQuery(rawDate);
 
-    const enabled = gameFilter(deps);
-    const today = store
-      .dailyChallenges(date, limits.challengePage)
-      .filter(enabled)
-      .map((challenge) => {
-        const contract = contractOf(challenge.gameId);
-        return {
-          gameId: challenge.gameId,
-          daily: challenge.daily,
-          resultCount: challenge.resultCount,
-          top: contract === undefined ? [] : store.topResults(challenge.id, TOP),
-        };
-      });
+    // Filtered in the query, before its limit: disabled games must not fill the page.
+    const enabled = settingsOf(deps).allowedGameIds;
+    const today = store.dailyChallenges(date, limits.challengePage, enabled).map((challenge) => {
+      const contract = contractOf(challenge.gameId);
+      return {
+        gameId: challenge.gameId,
+        daily: challenge.daily,
+        resultCount: challenge.resultCount,
+        top: contract === undefined ? [] : store.topResults(challenge.id, TOP),
+      };
+    });
 
     // The most-entered tables, each with its top three: a read of PUBLIC_TABLES summary
     // rows and TOP index rows per table, however many tables and entries there are.
-    const rankings = store
-      .popularRankingTables(PUBLIC_TABLES)
-      .filter(enabled)
-      .flatMap((table) => {
-        const top = store
-          .rankingTop(table.gameId, table.paramsKey, TOP)
-          .map((entry) => ({ nickname: entry.nickname, facts: entry.facts }));
-        // A summary row without entries cannot happen; if it ever does there is nothing to show.
-        if (top[0] === undefined) return [];
-        return [
-          {
-            gameId: table.gameId,
-            paramsKey: table.paramsKey,
-            entryCount: table.entryCount,
-            leader: top[0], // the first of `top`, kept for readers that predate it
-            top,
-          },
-        ];
-      });
+    const rankings = store.popularRankingTables(PUBLIC_TABLES, enabled).flatMap((table) => {
+      const top = store
+        .rankingTop(table.gameId, table.paramsKey, TOP)
+        .map((entry) => ({ nickname: entry.nickname, facts: entry.facts }));
+      // A summary row without entries cannot happen; if it ever does there is nothing to show.
+      if (top[0] === undefined) return [];
+      return [
+        {
+          gameId: table.gameId,
+          paramsKey: table.paramsKey,
+          entryCount: table.entryCount,
+          leader: top[0], // the first of `top`, kept for readers that predate it
+          top,
+        },
+      ];
+    });
 
     return {
       status: 200,

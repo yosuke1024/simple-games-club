@@ -9,7 +9,7 @@ import {
 } from '../auth/tokens.js';
 import type { ApiRequest, ApiResponse } from '../http/api.js';
 import { API_VERSION_HEADER, API_VERSION_VALUE } from '../http/api.js';
-import { readJsonObject, type JsonObject } from '../http/body.js';
+import { readBytes, readJsonObject, type JsonObject } from '../http/body.js';
 import { corsHeaders } from '../http/cors.js';
 import {
   ApiError,
@@ -254,6 +254,21 @@ export function createManagedApi(options: {
           if (requiresEntitlement(method, apiPath)) requireActive(holder, request.now);
           const sync = changesDirectory(method, apiPath);
           const changesVisibility = method === 'PATCH' && apiPath === '/api/v1/settings';
+          // A change waits behind the club's other changes. Read the client's body first,
+          // so a slow or unfinished upload (an unauthenticated join, say) cannot hold
+          // that queue while the tenant waits for it.
+          let body = request.body;
+          if (sync && method !== 'GET' && method !== 'HEAD') {
+            const bytes = await readBytes(request.body, DEFAULT_LIMITS.bodyBytes);
+            bodyRead = true;
+            body = {
+              contentLength: String(bytes.byteLength),
+              contentType: request.body.contentType,
+              async *chunks() {
+                if (bytes.byteLength > 0) yield bytes;
+              },
+            };
+          }
           const credential = {
             memberToken: managedMemberToken(
               config.secret,
@@ -284,6 +299,7 @@ export function createManagedApi(options: {
               {
                 ...request,
                 url,
+                body,
                 origin: `${origin}/clubs/${club.id}`,
               },
               credential,
@@ -294,8 +310,11 @@ export function createManagedApi(options: {
                 // A rejected owner edit must restore the unchanged public listing. If the
                 // tenant is unreachable, keeping it hidden is the safe retryable outcome.
                 store.syncClub(club.id, await transport.describe(club.id));
-              } catch (error) {
-                if (successful) throw error;
+              } catch {
+                // The tenant has committed: a join's member token exists only in this
+                // response (stored hashed), so it is never traded for a 500. The listing
+                // stays as it was until the next change or owner refresh syncs it.
+                if (successful) console.error('managed directory sync failed');
               }
             }
             // The tenant's names arrive lowercased (Fetch Headers); ours are not. Merged
