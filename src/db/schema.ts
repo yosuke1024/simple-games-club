@@ -229,10 +229,15 @@ export const RESULT_RANK_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS results_rank ON results (challenge_id, rank_class, rank_key);
 `;
 
-/** The tables' summary rows, most-entered first — the landing page's eight (club.md §18). */
+/**
+ * The tables' summary rows, most-entered first — the landing page's eight (club.md §18) —
+ * overall, and per game for a club that enables only some games (`popularRankingTables`).
+ */
 export const RANKING_POPULAR_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS ranking_tables_popular
   ON ranking_tables (entry_count DESC, game_id, params_key);
+CREATE INDEX IF NOT EXISTS ranking_tables_game_popular
+  ON ranking_tables (game_id, entry_count DESC, params_key);
 `;
 
 /**

@@ -480,5 +480,16 @@ describe('GET /api/v1/public rankings (club.md §18)', () => {
     // Eight tables are read either way: more tables and entries cost nothing more.
     expect(large).toBeLessThanOrEqual(small + 10);
     expect(large).toBeLessThan(80);
+
+    // The same with an allowlist: each enabled game's own eight, not all its tables.
+    const saved = await server.api('/api/v1/settings', {
+      method: 'PATCH',
+      token: yoh.token,
+      body: { allowedGameIds: ['sudoku', '2048'] },
+    });
+    expect(saved.status).toBe(200);
+    const filtered = await read('2026-01-03');
+    expect(filtered).not.toBeNull();
+    expect(filtered!).toBeLessThan(80);
   });
 });

@@ -2,7 +2,7 @@
  * Every SQL statement, behind typed methods. Handlers never see a row.
  */
 import { contractOf, resultRank, type Direction } from '../contracts/games.js';
-import type { Row, SqlDriver } from './driver.js';
+import type { Row, SqlDriver, SqlValue } from './driver.js';
 import { PolicyStore } from './policy.js';
 import { OwnerRecordStore } from './ownerRecords.js';
 
@@ -1330,26 +1330,35 @@ export class Store {
    * page's view. Read straight off `ranking_tables_popular`, so the cost is `limit`
    * rows whatever the number of tables.
    */
-  /** `gameIds` is applied before the limit, as in `dailyChallenges`. */
+  /**
+   * `gameIds` is applied before the limit, as in `dailyChallenges`. With an allowlist each
+   * game's own top `limit` is read off `ranking_tables_game_popular` and the lists merged:
+   * at most `limit` rows per enabled game, however many tables (`paramsKey` is the client's).
+   */
   popularRankingTables(
     limit: number,
     gameIds: readonly string[] | null = null,
   ): { gameId: string; paramsKey: string; entryCount: number }[] {
-    return filteredTop(
-      gameIds,
-      limit,
-      (ids) =>
-        this.db.all(
-          `SELECT game_id, params_key, entry_count FROM ranking_tables${inList(ids, ' WHERE')}
-           ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
-          ...(ids ?? []),
-          limit,
-        ),
-      (x, y) =>
-        Number(y.entry_count) - Number(x.entry_count) ||
-        binary(String(x.game_id), String(y.game_id)) ||
-        binary(String(x.params_key), String(y.params_key)),
-    ).map((row) => ({
+    const query = (where: string, ...params: SqlValue[]) =>
+      this.db.all(
+        `SELECT game_id, params_key, entry_count FROM ranking_tables ${where}
+         ORDER BY entry_count DESC, game_id, params_key LIMIT ?`,
+        ...params,
+        limit,
+      );
+    const rows =
+      gameIds === null
+        ? query('')
+        : gameIds
+            .flatMap((gameId) => query('WHERE game_id = ?', gameId))
+            .sort(
+              (x, y) =>
+                Number(y.entry_count) - Number(x.entry_count) ||
+                binary(String(x.game_id), String(y.game_id)) ||
+                binary(String(x.params_key), String(y.params_key)),
+            )
+            .slice(0, limit);
+    return rows.map((row) => ({
       gameId: text(row, 'game_id'),
       paramsKey: text(row, 'params_key'),
       entryCount: int(row, 'entry_count'),
