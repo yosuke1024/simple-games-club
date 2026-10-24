@@ -259,8 +259,9 @@ export function createManagedApi(options: {
           // that queue while the tenant waits for it.
           let body = request.body;
           if (sync && method !== 'GET' && method !== 'HEAD') {
-            const bytes = await readBytes(request.body, DEFAULT_LIMITS.bodyBytes);
+            // Set first: a 413 for a declared oversize must not then drain the upload.
             bodyRead = true;
+            const bytes = await readBytes(request.body, DEFAULT_LIMITS.bodyBytes);
             body = {
               contentLength: String(bytes.byteLength),
               contentType: request.body.contentType,

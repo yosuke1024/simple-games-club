@@ -280,6 +280,26 @@ describe.skipIf(process.env.CLUB_IMPL === 'workers')('managed metadata synchroni
     expect((await slow).status).toBe(200);
   });
 
+  it('answers a declared oversize body at once, without waiting for the upload', async () => {
+    const h = harness();
+    const upload = deferred();
+    const oversize = apiRequest('PATCH', `/clubs/${CLUB_ID}/api/v1/settings`);
+    oversize.body = {
+      contentType: 'application/json',
+      contentLength: String(1024 * 1024),
+      async *chunks() {
+        await upload.promise;
+        yield new Uint8Array(1);
+      },
+    };
+    const raced = await Promise.race([
+      h.handle(oversize).then((reply) => reply.status),
+      new Promise((done) => setTimeout(() => done('waiting'), 500)),
+    ]);
+    upload.resolve();
+    expect(raced).toBe(413);
+  });
+
   it('keeps a committed change when the directory refresh after it fails', async () => {
     // A join's member token is only in its response; a 500 would strand the membership.
     vi.spyOn(console, 'error').mockImplementation(() => {});

@@ -169,6 +169,23 @@ describe('GET /api/v1/public (club.md §18)', () => {
     expect(other.json.rankings).toEqual([]);
   });
 
+  it('answers with the largest allowlist a club may save (128 games) on both deployments', async () => {
+    // Durable Objects bind at most 100 SQL parameters: the filter must not become one each.
+    server = await startServer({ openJoin: true });
+    const yoh = await claimOwner(server, 'Yoh');
+    await createDaily(yoh, 'sudoku', 's1', { elapsedSeconds: 300 }, '2026-09-09');
+    const allowedGameIds = ['sudoku', ...Array.from({ length: 127 }, (_, i) => `game-${i}`)];
+    const saved = await server.api('/api/v1/settings', {
+      method: 'PATCH',
+      token: yoh.token,
+      body: { allowedGameIds },
+    });
+    expect(saved.status).toBe(200);
+    const feed = await server.api('/api/v1/public');
+    expect(feed.status).toBe(200);
+    expect(feed.json.today.map((d: { gameId: string }) => d.gameId)).toEqual(['sudoku']);
+  });
+
   it('rejects a date that is not a calendar date', async () => {
     server = await startServer({ openJoin: true });
     await claimOwner(server, 'Yoh');
