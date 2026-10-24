@@ -100,6 +100,9 @@ for (const entry of readdirSync(WEB)) {
   if (!KEEP.has(entry)) rmSync(join(WEB, entry), { recursive: true, force: true });
 }
 cpSync(dist, WEB, { recursive: true });
+// Vite's build manifest lists the build's file names: the app does not read it, and a
+// server has no reason to hand it out.
+rmSync(join(WEB, '.vite'), { recursive: true, force: true });
 writeFileSync(
   join(WEB, '.build-info.json'),
   `${JSON.stringify({ commit, dirty, origin: originArg, builtAt: new Date().toISOString() }, null, 2)}\n`,
