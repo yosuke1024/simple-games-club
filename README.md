@@ -155,9 +155,27 @@ deployment (`test/units.test.ts` checks `wrangler.toml`).
 
 The server answers `/` and `/join` with the Simple Games web build when one is
 present in `CLUB_WEB_DIR` (`index.html` plus `assets/`). It is a release
-artifact of the simple-games repository — the `dist-web/` output of its
-`web-build.yml` workflow — not something built here. Copy its contents into
-`web/` before `docker build`, or mount a directory at runtime.
+artifact of the simple-games repository, not something built here. Copy a
+`dist-web/` into `web/` before `docker build`, or mount a directory at runtime.
+
+For the Cloudflare deployments, `pnpm build:web` builds it from a clean
+simple-games checkout and replaces `web/` with it:
+
+```sh
+pnpm build:web ../simple-games                          # for club.pixapps.ai (wrangler.toml)
+pnpm build:web ../simple-games https://simple-games-club-staging.<account>.workers.dev
+pnpm deploy:production                                  # checks web/ was built for club.pixapps.ai, then deploys
+pnpm exec wrangler deploy --config wrangler.staging.toml
+```
+
+The copy is built for the origin it is served from: managed invites to that
+origin open in it even while the app's `MANAGED_CLUBS_ENABLED` is still false.
+It carries no ads and no analytics (every `VITE_` ad and GA variable is set
+empty). `web/.build-info.json` records the simple-games commit and the origin;
+it is not uploaded (`web/.assetsignore`). `pnpm deploy:production` refuses a
+copy built for another origin or from uncommitted changes.
+The copy asks for pixapps.ai's `/global-header.js` and `.css`, which this origin
+does not have; the app is built to do without them (two 404s, no header).
 
 Without a build the server still works: `/` and `/join` show a one-line notice
 and the API is fully usable. `/join/` (with a slash) redirects to `/join`,

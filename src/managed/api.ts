@@ -298,7 +298,15 @@ export function createManagedApi(options: {
                 if (successful) throw error;
               }
             }
-            return { ...response, headers: { ...response.headers, ...headers } };
+            // The tenant's names arrive lowercased (Fetch Headers); ours are not. Merged
+            // as they are, both spellings survive and become `X-Club-Api: 1, 1` and a
+            // doubled Access-Control-Allow-Origin, which the client and browsers reject.
+            const merged: Record<string, string> = {};
+            for (const source of [response.headers, headers]) {
+              for (const [name, value] of Object.entries(source))
+                merged[name.toLowerCase()] = value;
+            }
+            return { ...response, headers: merged };
           };
           return sync ? await withClubMutation(club.id, forward) : await forward();
         }

@@ -67,6 +67,20 @@ describe('managed hosting', () => {
     expect(unavailable.json.error.code).toBe('plan_unavailable');
   });
 
+  it("answers a club's API through the service with each header once", async () => {
+    // A doubled X-Club-Api reads as "1, 1": the app takes that for a newer contract.
+    // A doubled Access-Control-Allow-Origin fails CORS for the app and the Web version.
+    const club = await create();
+    const reply = await server.api(`${club.path}/club`, {
+      token: club.token,
+      headers: { Origin: 'capacitor://localhost' },
+    });
+    expect(reply.status).toBe(200);
+    expect(reply.headers.get('x-club-api')).toBe('1');
+    expect(reply.headers.get('access-control-allow-origin')).toBe('capacitor://localhost');
+    expect(reply.headers.get('cache-control')).toBe('no-store');
+  });
+
   it('never lets an owner key mint or extend its own entitlement', async () => {
     const lookup = `${ROOT}/admin/owners?reference=billing_owner_1`;
     const recovered = await server.api(lookup, { token: MANAGED_ADMIN_KEY });
