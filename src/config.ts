@@ -9,6 +9,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { appLinksFrom, type AppLinksConfig } from './http/appLinks.js';
 import { randomHex } from './auth/tokens.js';
 
 import type { ApiConfig, HostingConfig } from './api/deps.js';
@@ -31,6 +32,8 @@ export interface Config extends ApiConfig {
   log: boolean;
   /** Absent unless the operator explicitly enables managed hosting. */
   managedHosting?: ManagedConfig | null;
+  /** The app that may open this server's invite links (src/http/appLinks.ts). */
+  appLinks: AppLinksConfig;
 }
 
 const blankToNull = (value: string | undefined): string | null => {
@@ -101,6 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     publicOrigin: publicOriginFrom(env),
     corsOrigins,
     managedHosting: managedConfigFrom(env, corsOrigins),
+    appLinks: appLinksFrom(env),
     hosting: hostingFrom(env),
     openJoin: env.CLUB_OPEN_JOIN === '1',
     trustProxy: env.CLUB_TRUST_PROXY !== '0',

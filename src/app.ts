@@ -11,6 +11,7 @@ import { Store } from './db/store.js';
 import { API_VERSION_HEADER, API_VERSION_VALUE, createApi } from './http/api.js';
 import type { BodySource } from './http/body.js';
 import { serveStatic } from './http/static.js';
+import { appLinksBody } from './http/appLinks.js';
 import type { Limits } from './limits.js';
 import { createNodeManaged } from './managed/node.js';
 import { isManagedPath } from './managed/plans.js';
@@ -164,6 +165,15 @@ export function createApp(options: AppOptions): App {
         if (config.log) console.error('club API request failed');
         fail(res, 500);
       });
+      return;
+    }
+    if (url.pathname.startsWith('/.well-known/')) {
+      const body = appLinksBody(url.pathname, config.appLinks);
+      res.writeHead(body === null ? 404 : 200, {
+        'Content-Type': body === null ? 'text/plain; charset=utf-8' : 'application/json',
+        'Cache-Control': 'public, max-age=3600',
+      });
+      res.end(body === null ? 'Not found' : req.method === 'HEAD' ? undefined : body);
       return;
     }
     if (!serveStatic(req, res, url.pathname, { webDir: config.webDir })) {

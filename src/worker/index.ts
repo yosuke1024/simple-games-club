@@ -22,6 +22,7 @@ import { sqlDriver, type RowCounter } from './driver.js';
 import { apiConfigFrom, settingsFrom, type Env, type WorkerSettings } from './env.js';
 import { randomHex } from '../auth/tokens.js';
 import { isManagedPath } from '../managed/plans.js';
+import { appLinksBody, appLinksFrom } from '../http/appLinks.js';
 export { ManagedDirectoryObject, ManagedClubObject } from './managed.js';
 
 /** The object's name when `CLUB_OBJECT_NAME` is not set. */
@@ -102,6 +103,17 @@ async function servePage(request: Request, url: URL, env: Env): Promise<Response
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/.well-known/')) {
+      const body = appLinksBody(url.pathname, appLinksFrom(env));
+      return new Response(body === null || request.method === 'HEAD' ? null : body, {
+        status: body === null ? 404 : 200,
+        headers: {
+          [API_VERSION_HEADER]: API_VERSION_VALUE,
+          'Content-Type': body === null ? 'text/plain; charset=utf-8' : 'application/json',
+          'Cache-Control': 'public, max-age=3600',
+        },
+      });
+    }
     if (!url.pathname.startsWith('/api/') && !isManagedPath(url.pathname))
       return servePage(request, url, env);
 

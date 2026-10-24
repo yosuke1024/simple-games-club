@@ -29,7 +29,7 @@ workers_dev = false
 directory = "./web"
 binding = "ASSETS"
 not_found_handling = "none"
-run_worker_first = ["/api/*", "/clubs/*", "/", "/index.html", "/join", "/join/"]
+run_worker_first = ["/api/*", "/clubs/*", "/.well-known/*", "/", "/index.html", "/join", "/join/"]
 
 [[durable_objects.bindings]]
 name = "CLUB"
@@ -73,6 +73,11 @@ CLUB_HOSTING_PROVIDER = "cloudflare"
 # Managed Club Houses on this same origin: invites are
 # https://club.pixapps.ai/join#club=…, endpoints https://club.pixapps.ai/clubs/<id>.
 CLUB_MANAGED_ENABLED = "1"
+# The app that opens invite links when it is installed (src/http/appLinks.ts).
+# Android: the upload key (directly installed APKs) and Play's app-signing key.
+CLUB_ANDROID_PACKAGE = "com.pixapps.simplegames"
+CLUB_ANDROID_CERT_SHA256 = "BF:0B:5A:52:D6:42:4E:74:5E:7A:76:10:45:D9:72:65:61:C5:C9:B3:5D:02:E3:F4:1E:AA:84:4D:09:7E:0A:7F,B8:D4:B9:44:09:76:F2:93:85:95:3F:B3:AF:5F:6F:58:99:C3:AC:03:62:4F:F5:64:5F:45:57:E6:96:76:08:C6"
+CLUB_IOS_APP_IDS = "8XR3LLAS54.com.pixapps.simplegames"
 # Invite links name this origin whichever hostname the request arrived on.
 CLUB_PUBLIC_ORIGIN = "https://club.pixapps.ai"
 # The Web version at pixapps.ai joins the Public Club House from its own origin
