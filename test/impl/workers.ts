@@ -41,6 +41,7 @@ function bindingsFor(options: ServerOptions): Bindings {
   if (options.openJoin) bindings.CLUB_OPEN_JOIN = '1';
   if (options.setupKey !== null) bindings.CLUB_SETUP_KEY = options.setupKey;
   if (options.publicOrigin !== null) bindings.CLUB_PUBLIC_ORIGIN = options.publicOrigin;
+  Object.assign(bindings, options.appLinks);
   if (options.managed) {
     bindings.CLUB_MANAGED_ENABLED = '1';
     bindings.CLUB_MANAGED_SECRET = MANAGED_SECRET;

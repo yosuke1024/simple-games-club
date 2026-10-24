@@ -17,6 +17,10 @@ export interface Env {
   CLUB_MANAGED_ENABLED?: string;
   CLUB_MANAGED_SECRET?: string;
   CLUB_MANAGED_ADMIN_KEY?: string;
+  /** The app that may open this server's invite links (src/http/appLinks.ts). */
+  CLUB_ANDROID_PACKAGE?: string;
+  CLUB_ANDROID_CERT_SHA256?: string;
+  CLUB_IOS_APP_IDS?: string;
   /** The Simple Games web build, when wrangler.toml's `[assets]` has one to serve. */
   ASSETS?: Fetcher;
   /**

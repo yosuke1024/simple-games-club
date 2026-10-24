@@ -56,6 +56,8 @@ export interface ServerOptions {
   /** Workers only: the Durable Object's name (`CLUB_OBJECT_NAME`); Node ignores it. */
   objectName: string | null;
   managed: boolean;
+  /** The app-link variables (src/http/appLinks.ts), as a deployment would set them. */
+  appLinks: Record<string, string>;
 }
 
 export const DEFAULTS: ServerOptions = {
@@ -68,6 +70,7 @@ export const DEFAULTS: ServerOptions = {
   openJoin: false,
   objectName: null,
   managed: false,
+  appLinks: {},
 };
 
 export const newClock = (): Clock => ({

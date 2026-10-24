@@ -131,22 +131,23 @@ The same names on both deployments — environment variables for the Node
 server, `[vars]` and secrets for the Worker. Rows marked _Node_ have no
 meaning on Workers (there is no port, no directory, no proxy in front).
 
-| Variable                  | Default               | Meaning                                                                                                                   |
-| ------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                    | `8080`                | _Node._ Listening port                                                                                                    |
-| `CLUB_DATA_DIR`           | `./data` (`/data`)    | _Node._ The persistent directory: `club.sqlite` and `secret`                                                              |
-| `CLUB_SETUP_KEY`          | —                     | Claims the club once. Re-set it to allow one more claim. A secret on Workers                                              |
-| `CLUB_SECRET`             | generated             | Pepper for token hashes. Generated into `CLUB_DATA_DIR/secret` (Node) or the object's storage (Workers) when absent       |
-| `CLUB_PUBLIC_ORIGIN`      | request host          | `https://…` used in invite links. Falls back to `RAILWAY_PUBLIC_DOMAIN`, then to the request                              |
-| `CLUB_WEB_DIR`            | `./web`               | _Node._ Where the Simple Games web build is served from (Workers: the `[assets]` directory)                               |
-| `CLUB_CORS_ORIGINS`       | —                     | Extra allowed origins, comma-separated (a local dev server). The app origins are always allowed                           |
-| `CLUB_HOSTING_PROVIDER`   | `railway` if there    | A label for the owner's Hosting screen (`cloudflare` in `wrangler.toml`)                                                  |
-| `CLUB_HOSTING_MANAGE_URL` | derived on Railway    | The provider dashboard, shown to owners only                                                                              |
-| `CLUB_TRUST_PROXY`        | `1` Node, `0` Workers | Read `X-Forwarded-*` instead of the connection (Node: every PaaS sets them; Workers: Cloudflare already names the client) |
-| `CLUB_OPEN_JOIN`          | —                     | `1` lets `POST /join` take a nickname alone (the Public deployment); unset, an invite token is required (a Private one)   |
-| `CLUB_OBJECT_NAME`        | `club`                | _Workers._ The Durable Object's name (`idFromName`). A new name starts a fresh club; `wrangler.toml` sets `club-2026-10`  |
-| `CLUB_LIMITS`             | —                     | _Workers._ A JSON object overriding entries of `src/limits.ts` for one deployment                                         |
-| `CLUB_LOG`                | `1`                   | _Node._ `0` silences the one-line request log                                                                             |
+| Variable                                                                 | Default               | Meaning                                                                                                                                                                        |
+| ------------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                                                                   | `8080`                | _Node._ Listening port                                                                                                                                                         |
+| `CLUB_DATA_DIR`                                                          | `./data` (`/data`)    | _Node._ The persistent directory: `club.sqlite` and `secret`                                                                                                                   |
+| `CLUB_SETUP_KEY`                                                         | —                     | Claims the club once. Re-set it to allow one more claim. A secret on Workers                                                                                                   |
+| `CLUB_SECRET`                                                            | generated             | Pepper for token hashes. Generated into `CLUB_DATA_DIR/secret` (Node) or the object's storage (Workers) when absent                                                            |
+| `CLUB_PUBLIC_ORIGIN`                                                     | request host          | `https://…` used in invite links. Falls back to `RAILWAY_PUBLIC_DOMAIN`, then to the request                                                                                   |
+| `CLUB_WEB_DIR`                                                           | `./web`               | _Node._ Where the Simple Games web build is served from (Workers: the `[assets]` directory)                                                                                    |
+| `CLUB_CORS_ORIGINS`                                                      | —                     | Extra allowed origins, comma-separated (a local dev server). The app origins are always allowed                                                                                |
+| `CLUB_HOSTING_PROVIDER`                                                  | `railway` if there    | A label for the owner's Hosting screen (`cloudflare` in `wrangler.toml`)                                                                                                       |
+| `CLUB_HOSTING_MANAGE_URL`                                                | derived on Railway    | The provider dashboard, shown to owners only                                                                                                                                   |
+| `CLUB_TRUST_PROXY`                                                       | `1` Node, `0` Workers | Read `X-Forwarded-*` instead of the connection (Node: every PaaS sets them; Workers: Cloudflare already names the client)                                                      |
+| `CLUB_OPEN_JOIN`                                                         | —                     | `1` lets `POST /join` take a nickname alone (the Public deployment); unset, an invite token is required (a Private one)                                                        |
+| `CLUB_OBJECT_NAME`                                                       | `club`                | _Workers._ The Durable Object's name (`idFromName`). A new name starts a fresh club; `wrangler.toml` sets `club-2026-10`                                                       |
+| `CLUB_LIMITS`                                                            | —                     | _Workers._ A JSON object overriding entries of `src/limits.ts` for one deployment                                                                                              |
+| `CLUB_ANDROID_PACKAGE` / `CLUB_ANDROID_CERT_SHA256` / `CLUB_IOS_APP_IDS` | —                     | The app that may open `/join` invite links when installed (`/.well-known/assetlinks.json`, `/.well-known/apple-app-site-association`; `src/http/appLinks.ts`). Unset: both 404 |
+| `CLUB_LOG`                                                               | `1`                   | _Node._ `0` silences the one-line request log                                                                                                                                  |
 
 `CLUB_TEST_MODE` also exists — for the test harness only, never set on a
 deployment (`test/units.test.ts` checks `wrangler.toml`).

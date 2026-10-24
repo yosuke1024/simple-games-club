@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../src/app.js';
+import { appLinksFrom } from '../../src/http/appLinks.js';
 import type { Config } from '../../src/config.js';
 import { openDatabase, type NodeDatabase } from '../../src/db/database.js';
 import {
@@ -39,6 +40,7 @@ export async function startNodeServer(overrides: Partial<ServerOptions>): Promis
       openJoin: options.openJoin,
       trustProxy: true,
       log: false,
+      appLinks: appLinksFrom(options.appLinks),
       managedHosting: options.managed
         ? {
             secret: MANAGED_SECRET,

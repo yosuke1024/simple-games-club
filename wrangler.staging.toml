@@ -21,7 +21,7 @@ workers_dev = true
 directory = "./web"
 binding = "ASSETS"
 not_found_handling = "none"
-run_worker_first = ["/api/*", "/clubs/*", "/", "/index.html", "/join", "/join/"]
+run_worker_first = ["/api/*", "/clubs/*", "/.well-known/*", "/", "/index.html", "/join", "/join/"]
 
 [[durable_objects.bindings]]
 name = "CLUB"
