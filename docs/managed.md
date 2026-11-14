@@ -150,6 +150,28 @@ retrying it uses the reserved slot instead of spending another club. Connect als
 recovers a reserved club if provisioning was interrupted. Owner reconnect does not
 add another member or discard existing member records.
 
+### Operations statistics
+
+`GET /admin/stats` answers how many owners and clubs exist, how many members each
+club has and which clubs have reached their plan's member limit:
+
+```sh
+curl -sS -H "Authorization: Bearer $CLUB_MANAGED_ADMIN_KEY" https://club.pixapps.ai/api/v1/managed/admin/stats
+```
+
+The response is
+`{generatedAt, owners: {total, trial, basic, active, expired}, clubs: {total, ready, provisioning, public, private, atCapacity}, perClub}`.
+Each `perClub` entry (oldest first) carries `id`, `name`, the holder's `plan` and
+`ownerActive`, `createdAt`, `memberCount`, `maxMembers`, `atCapacity`, `visibility`,
+`approvalRequired` and `status`. A club is at capacity when it is ready and
+`memberCount >= maxMembers`. References and key hashes are never included.
+
+The endpoint is read-only and reads only the registry: it writes nothing and wakes
+no club. `memberCount` is therefore the registry's cached value, refreshed when the
+owner screen loads (`GET /owner` or a Trial retry) and on operations that sync the
+directory (joins, approvals, member removal, settings and club edits). It can lag a
+club whose last change did not reach the registry.
+
 ### Lost or compromised owner key
 
 Rotate with the operator API, then deliver the new owner key and reconnect each

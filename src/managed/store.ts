@@ -232,6 +232,33 @@ export class ManagedStore {
     );
   }
 
+  /** Operator statistics: entitlement fields only, never references or token hashes. */
+  ownerEntitlements(): Array<{ plan: ManagedPlanId; validUntil: string | null }> {
+    return this.db
+      .all('SELECT plan, valid_until FROM managed_owners ORDER BY created_at')
+      .map((row) => ({
+        plan: row.plan === 'trial' ? 'trial' : 'basic',
+        validUntil: row.valid_until === null ? null : String(row.valid_until),
+      }));
+  }
+
+  /** Every club with its holder's entitlement, oldest first. `memberCount` is the cached value. */
+  clubsWithOwners(): Array<
+    ManagedClub & { ownerPlan: ManagedPlanId; ownerValidUntil: string | null }
+  > {
+    return this.db
+      .all(
+        `SELECT c.*, o.plan AS owner_plan, o.valid_until AS owner_valid_until
+        FROM managed_clubs c JOIN managed_owners o ON o.id = c.owner_id
+        ORDER BY c.created_at, c.seq`,
+      )
+      .map((row) => ({
+        ...clubOf(row),
+        ownerPlan: row.owner_plan === 'trial' ? 'trial' : 'basic',
+        ownerValidUntil: row.owner_valid_until === null ? null : String(row.owner_valid_until),
+      }));
+  }
+
   directory(
     after: string | null,
     now: string,
