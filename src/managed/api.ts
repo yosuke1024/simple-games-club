@@ -63,7 +63,7 @@ export const managedConfigFrom = (
   return { secret, adminKey, corsOrigins };
 };
 
-const active = (owner: ManagedOwner, now: Date): boolean =>
+const active = (owner: Pick<ManagedOwner, 'validUntil'>, now: Date): boolean =>
   owner.validUntil === null || owner.validUntil > now.toISOString();
 const ownerShape = (owner: ManagedOwner, now: Date) => ({
   id: owner.id,
@@ -412,6 +412,48 @@ export function createManagedApi(options: {
           };
           store.addOwner(owner);
           return json(201, { owner: ownerShape(owner, request.now), ownerToken });
+        }
+        if (method === 'GET' && path === `${MANAGED_PREFIX}/admin/stats`) {
+          // Read-only and registry-only: no tenant object is woken, so memberCount is the
+          // directory's cached value from the last owner refresh or directory sync.
+          adminAuth();
+          const owners = store.ownerEntitlements();
+          const activeOwners = owners.filter((owner) => active(owner, request.now)).length;
+          const perClub = store.clubsWithOwners().map((club) => {
+            const maxMembers = planOf(club.ownerPlan).maxMembersPerClub;
+            return {
+              id: club.id,
+              name: club.name,
+              plan: club.ownerPlan,
+              ownerActive: active({ validUntil: club.ownerValidUntil }, request.now),
+              createdAt: club.createdAt,
+              memberCount: club.memberCount,
+              maxMembers,
+              atCapacity: club.status === 'ready' && club.memberCount >= maxMembers,
+              visibility: club.visibility,
+              approvalRequired: club.approvalRequired,
+              status: club.status,
+            };
+          });
+          return json(200, {
+            generatedAt: request.now.toISOString(),
+            owners: {
+              total: owners.length,
+              trial: owners.filter((owner) => owner.plan === 'trial').length,
+              basic: owners.filter((owner) => owner.plan === 'basic').length,
+              active: activeOwners,
+              expired: owners.length - activeOwners,
+            },
+            clubs: {
+              total: perClub.length,
+              ready: perClub.filter((club) => club.status === 'ready').length,
+              provisioning: perClub.filter((club) => club.status === 'provisioning').length,
+              public: perClub.filter((club) => club.visibility === 'public').length,
+              private: perClub.filter((club) => club.visibility === 'private').length,
+              atCapacity: perClub.filter((club) => club.atCapacity).length,
+            },
+            perClub,
+          });
         }
         const adminOwner = new RegExp(
           `^${MANAGED_PREFIX}/admin/owners/(o_[A-Za-z0-9_-]{12})(/rotate-token)?$`,
