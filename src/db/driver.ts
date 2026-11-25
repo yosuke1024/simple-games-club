@@ -65,6 +65,7 @@ export function migrate(db: SqlDriver): void {
   // v7 adds club settings, pending admissions and owner record albums. SCHEMA_SQL
   // creates these tables idempotently; existing member/result rows need no rewrite.
   if (stored < 7) db.run(`UPDATE meta SET value = '7' WHERE key = 'schema_version'`);
+  if (stored < 8) upgradeToV8(db);
   addRankingClientId(db);
   db.exec(RANKING_INDEX_SQL);
   db.exec(RANKING_CLIENT_INDEX_SQL);
@@ -221,6 +222,18 @@ export function upgradeToV6(db: SqlDriver): void {
   }
   rebuildRankingTables(db);
   db.run(`UPDATE meta SET value = '6' WHERE key = 'schema_version'`);
+}
+
+/**
+ * v7 → v8 (the app's club.md §14 decision 57, 2026-11-15): fourteen games gained a contract
+ * in GAME_CONTRACTS. No table changes; a completed result of one of them stored before now was
+ * written as class 1 (no axis), so every stored result's rank is computed again by
+ * `rerankResults`, which writes only the rows whose rank changed — running it again changes
+ * nothing. Rankings need nothing: a game without a contract has no ranking rows to reorder.
+ */
+export function upgradeToV8(db: SqlDriver): void {
+  rerankResults(db);
+  db.run(`UPDATE meta SET value = '8' WHERE key = 'schema_version'`);
 }
 
 /**

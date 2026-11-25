@@ -6,7 +6,11 @@
  * computes `paramsKey` and the server only checks its shape. A game missing
  * here simply has no rankings until the server learns it; its challenges and
  * results work as they are (Checkers, Connect Four, Gomoku and Ludo are
- * deliberately absent — club.md §16).
+ * deliberately absent — club.md §16). Decision 57 of the app's club.md
+ * (2026-11-15) keeps 31 games out on purpose, those four among them: the ones
+ * that only win or lose, the ones whose result screen has no number that
+ * compares performance, and the ones whose number saturates or has a loophole.
+ * Their absence here is the decision, not a gap.
  *
  * Changing this table (a game added, an axis or a direction changed) changes where
  * stored results sort: `results.rank_class` / `rank_key` are written from it when a
@@ -43,6 +47,12 @@ export const GAME_CONTRACTS: Readonly<Record<string, GameContract>> = Object.fro
     'quick-math',
     'memory-match',
     'mahjong-solitaire',
+    'unblock-puzzle',
+    'loop-puzzle',
+    'bridges',
+    'pipe-link',
+    'make-the-target',
+    'tangram',
   ]),
   ...of('moves', 'asc', [
     'water-sort',
@@ -51,6 +61,9 @@ export const GAME_CONTRACTS: Readonly<Record<string, GameContract>> = Object.fro
     'spider-solitaire',
     'freecell',
     'number-match',
+    'light-grid',
+    'color-flood',
+    'chain-territory',
   ]),
   ...of('attempts', 'asc', ['hit-and-blow']),
   ...of('score', 'desc', [
@@ -65,6 +78,11 @@ export const GAME_CONTRACTS: Readonly<Record<string, GameContract>> = Object.fro
     'mancala',
     'reversi',
     'dots-and-boxes',
+    'snake',
+    'gem-swap',
+    'bounce-up',
+    'invaders', // the id of Formation Fire
+    'scopa',
   ]),
   // Hearts is scored like golf: fewer points win.
   ...of('score', 'asc', ['hearts']),
