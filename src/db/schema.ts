@@ -14,7 +14,7 @@
 import { OWNER_RECORDS_SQL } from './ownerRecordsSchema.js';
 import { POLICY_SQL } from './policySchema.js';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /*
  * v2 (the Public deployment, club.md §5-4): `challenges.daily` tags a board as
@@ -65,6 +65,16 @@ export const SCHEMA_VERSION = 7;
  * `Store.addRanking` looks the pair up first and answers with the stored row. The column is
  * in `RANKING_ENTRIES_SQL`, and `migrate()` adds it to a database already at v6 without it
  * (a developer database from before the key — v6 was never deployed) before the index is built.
+ *
+ * v7 (managed hosting, 2026-10-23): club settings, pending admissions and owner record albums
+ * (`POLICY_SQL`, `OWNER_RECORDS_SQL`), created idempotently by SCHEMA_SQL; no row is rewritten.
+ *
+ * v8 (the app's club.md §14 decision 57, 2026-11-15): no table changes. Fourteen games gained a
+ * contract in src/contracts/games.ts, so a completed challenge result of one of them that is
+ * already stored — written as class 1 (completed, no axis) while the game had none — must now
+ * sort by its axis. `upgradeToV8` (src/db/driver.ts) runs `rerankResults` over every stored
+ * result, which rewrites only the rows whose rank changed. No ranking row needs it:
+ * `POST /rankings/results` refuses a game without a contract, so those tables start empty.
  */
 
 /**

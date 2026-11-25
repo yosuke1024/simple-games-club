@@ -11,6 +11,7 @@ import {
   rerankResults,
   upgradeToV5,
   upgradeToV6,
+  upgradeToV8,
   type SqlDriver,
   type SqlValue,
 } from '../src/db/driver.js';
@@ -176,7 +177,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('8');
     expect(d.get(`SELECT result_count, daily FROM challenges WHERE id = 'ch1'`)).toEqual({
       result_count: 2,
       daily: null,
@@ -210,7 +211,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // idempotent
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('8');
     expect(d.get(`SELECT name FROM sqlite_master WHERE name = 'records'`)).toBeUndefined();
     expect(d.all(`SELECT * FROM ranking_entries`)).toEqual([]);
     expect(
@@ -650,7 +651,7 @@ describe('migrate() from schema 1', () => {
     migrate(d);
     migrate(d); // and again: nothing changes
 
-    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('7');
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('8');
     expect(d.all(`SELECT seq, member_id, value, client_id FROM ranking_entries`)).toEqual([
       { seq: 1, member_id: 'a', value: 300, client_id: null },
     ]);
@@ -674,6 +675,93 @@ describe('migrate() from schema 1', () => {
       });
     expect(send()).toMatchObject({ duplicate: false, entryCount: 2, entry: { seq: 2 } });
     expect(send()).toMatchObject({ duplicate: true, entryCount: 2, entry: { seq: 2 } });
+  });
+
+  it('upgradeToV8 ranks the stored results of the games decision 57 added, and a second run writes nothing', () => {
+    const d = openRaw();
+    migrate(d); // a current database…
+    for (const id of ['a', 'b', 'c']) {
+      d.run(
+        `INSERT INTO members (id, nickname, role, joined_at, token_hash) VALUES (?, ?, 'member', 't', ?)`,
+        id,
+        id,
+        `h${id}`,
+      );
+    }
+    for (const game of ['bridges', 'light-grid', 'snake', 'chess']) {
+      d.run(
+        `INSERT INTO challenges (id, game_id, contract_version, params_json, seed, board_digest, created_by, created_at)
+         VALUES (?, ?, 1, '{}', 's', ?, 'a', 't')`,
+        `ch-${game}`,
+        game,
+        `d-${game}`,
+      );
+    }
+    // …holding results as a v7 server wrote them, before these games had a contract: every
+    // completed one class 1 without a key, a played one class 2.
+    const put = (game: string, member: string, outcome: string, facts: string) =>
+      d.run(
+        `INSERT INTO results (challenge_id, member_id, nickname, submitted_at, outcome, facts_json, rank_class, rank_key)
+         VALUES (?, ?, ?, 't', ?, ?, ?, NULL)`,
+        `ch-${game}`,
+        member,
+        member,
+        outcome,
+        facts,
+        outcome === 'completed' ? 1 : 2,
+      );
+    put('bridges', 'a', 'completed', '{"elapsedSeconds":95,"hints":0}');
+    put('bridges', 'b', 'completed', '{"hints":1}'); // no axis: stays class 1
+    put('bridges', 'c', 'played', '{"elapsedSeconds":40}'); // never ranked
+    put('light-grid', 'a', 'completed', '{"moves":7}');
+    put('snake', 'a', 'completed', '{"score":0}');
+    put('snake', 'b', 'completed', '{"score":42}');
+    put('chess', 'a', 'completed', '{"moves":30}'); // kept out by decision 57: no contract
+    d.run(`UPDATE meta SET value = '7' WHERE key = 'schema_version'`); // …made to look like v7
+
+    migrate(d);
+
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('8');
+    const rankOf = (game: string, member: string) =>
+      d.get(
+        `SELECT rank_class, rank_key FROM results WHERE challenge_id = ? AND member_id = ?`,
+        `ch-${game}`,
+        member,
+      );
+    expect(rankOf('bridges', 'a')).toEqual({ rank_class: 0, rank_key: 95 });
+    expect(rankOf('bridges', 'b')).toEqual({ rank_class: 1, rank_key: null });
+    expect(rankOf('bridges', 'c')).toEqual({ rank_class: 2, rank_key: null });
+    expect(rankOf('light-grid', 'a')).toEqual({ rank_class: 0, rank_key: 7 });
+    expect(rankOf('snake', 'a')).toEqual({ rank_class: 0, rank_key: 0 });
+    expect(rankOf('snake', 'b')).toEqual({ rank_class: 0, rank_key: -42 });
+    expect(rankOf('chess', 'a')).toEqual({ rank_class: 1, rank_key: null });
+    // The challenge's best-first read now puts the timed result ahead of the one without a time.
+    expect(
+      d
+        .all(
+          `SELECT member_id FROM results WHERE challenge_id = 'ch-bridges'
+           ORDER BY rank_class, rank_key, seq`,
+        )
+        .map((row) => row.member_id),
+    ).toEqual(['a', 'b', 'c']);
+
+    // Run again, through migrate() and by hand: no result is written, and nothing moves.
+    const before = d.all(`SELECT seq, rank_class, rank_key FROM results ORDER BY seq`);
+    const writes: string[] = [];
+    const spy: SqlDriver = {
+      exec: (script) => d.exec(script),
+      run: (sql, ...params) => {
+        if (/UPDATE\s+results/i.test(sql)) writes.push(sql);
+        d.run(sql, ...params);
+      },
+      get: (sql, ...params) => d.get(sql, ...params),
+      all: (sql, ...params) => d.all(sql, ...params),
+    };
+    migrate(spy);
+    upgradeToV8(spy);
+    expect(writes).toEqual([]);
+    expect(d.all(`SELECT seq, rank_class, rank_key FROM results ORDER BY seq`)).toEqual(before);
+    expect(d.get(`SELECT value FROM meta WHERE key = 'schema_version'`)?.value).toBe('8');
   });
 
   it("reads a rank with two range counts and the member's rows off ranking_entries_member, never a scan or a sort", () => {

@@ -361,6 +361,37 @@ the same table. The first five rows are results sent without a `clientId`:
   a second swap changed nothing. That check is a one-off script, not a checked-in test; the same
   upgrade, and a run that stopped half-way, are tested on node:sqlite in `test/migrate.test.ts`.
 
+### 2026-11-15 (schema 8, fourteen more games ranked)
+
+The app's club.md §14 decision 57 gave fourteen games a contract in `GAME_CONTRACTS`
+(src/contracts/games.ts) — time, lower first: Unblock Puzzle, Loop Puzzle, Bridges, Pipe Link,
+Make the Target, Tangram; moves, lower first: Light Grid, Color Flood, Chain Territory; score,
+higher first: Snake, Gem Swap, Bounce Up, Formation Fire (`invaders`), Scopa — and keeps 31
+other games out on purpose. A contract change is a schema change ("A change to the game
+contracts is a schema change", above), so this is schema 8:
+
+- **No table or index changes.** `upgradeToV8` (src/db/driver.ts) calls `rerankResults` and
+  sets `schema_version` to 8. It reads every stored result once, with its challenge's
+  `game_id`, and rewrites `rank_class` / `rank_key` only on the rows whose rank changed: a
+  completed result of one of the fourteen games that carries its axis, which a schema-7 server
+  stored as class 1 (completed, no axis), becomes class 0 with its key. Every other row is read
+  and left alone. So the rows read are proportional to the results stored, once; the rows
+  written are those results of the fourteen games (each with its `results_rank` index entry),
+  which is none on a club where no client could send them yet.
+- **Rankings need nothing.** `POST /rankings/results` refuses a game without a contract
+  (`no ranking for this game`), so no ranking row of the fourteen games exists to reorder;
+  their tables start empty with schema 8.
+- **The upgrade is one way, like schema 5's and 6's.** A club's object runs it on its first
+  request after the deploy (on the managed deployment, each club object when it is first
+  reached), and a server older than this refuses the database it leaves
+  (`database schema 8 is newer than this server`), so rolling the Worker back afterwards needs
+  a restore, not a redeploy. It is tested on node:sqlite in `test/migrate.test.ts` (a v7
+  database's stored results of three of the games and of one kept out, then a second run that
+  writes nothing); it was not run in workerd and not measured.
+- **Deploy the server before the clients that send these games.** Until the object is at
+  schema 8, a ranking result of one of them is refused with `400 invalid_request` and the
+  client does not resend it.
+
 ## 4. Where the free plan's ceilings fall (arithmetic, not a forecast)
 
 These are counts, derived from §2 and §3. They say how much use fits in a day, not what

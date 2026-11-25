@@ -78,6 +78,66 @@ describe('resultRank (club.md §5-3)', () => {
     }
     expect(contractOf('sudoku')).toEqual({ order: 'elapsedSeconds', direction: 'asc' });
   });
+
+  it('knows the fourteen games decision 57 added, and none of the 31 it keeps out', () => {
+    const added: [string, string, 'asc' | 'desc'][] = [
+      ['unblock-puzzle', 'elapsedSeconds', 'asc'],
+      ['loop-puzzle', 'elapsedSeconds', 'asc'],
+      ['bridges', 'elapsedSeconds', 'asc'],
+      ['pipe-link', 'elapsedSeconds', 'asc'],
+      ['make-the-target', 'elapsedSeconds', 'asc'],
+      ['tangram', 'elapsedSeconds', 'asc'],
+      ['light-grid', 'moves', 'asc'],
+      ['color-flood', 'moves', 'asc'],
+      ['chain-territory', 'moves', 'asc'],
+      ['snake', 'score', 'desc'],
+      ['gem-swap', 'score', 'desc'],
+      ['bounce-up', 'score', 'desc'],
+      ['invaders', 'score', 'desc'],
+      ['scopa', 'score', 'desc'],
+    ];
+    for (const [gameId, order, direction] of added) {
+      expect(contractOf(gameId), gameId).toEqual({ order, direction });
+    }
+    const keptOut = [
+      // Win or lose only.
+      'ludo',
+      'checkers',
+      'connect-four',
+      'gomoku',
+      'chess',
+      'nested-tic-tac-toe',
+      'nim',
+      'backgammon',
+      'daifugo',
+      'sevens',
+      'old-maid',
+      'durak',
+      'texas-holdem',
+      // No number on the result screen that compares performance.
+      'peg-solitaire',
+      'knight-tour',
+      'three-peaks',
+      'hanoi-towers',
+      'river-cargo',
+      'overtake',
+      'crazy-eights',
+      'indian-rummy',
+      // A number that saturates or has a loophole.
+      'brick-breaker',
+      'bubble-pop',
+      'echo-pads',
+      'maze-escape',
+      'frost-route',
+      'ridge-cannons',
+      'paddle-rally',
+      'fleet-search',
+      'spades',
+      'blackjack',
+    ];
+    expect(keptOut).toHaveLength(31);
+    for (const gameId of keptOut) expect(contractOf(gameId), gameId).toBeUndefined();
+  });
 });
 
 describe('RateLimiter', () => {
